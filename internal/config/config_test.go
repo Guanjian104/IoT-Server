@@ -90,6 +90,45 @@ func TestLoadRejectsEmptyHost(t *testing.T) {
 	}
 }
 
+func TestHookListenerIsSeparate(t *testing.T) {
+	cfg, err := Load(func(key string) (string, bool) {
+		switch key {
+		case "IOT_HTTP_ADDR":
+			return "127.0.0.1:18080", true
+		case "IOT_HOOK_ADDR":
+			return "127.0.0.1:18082", true
+		case "IOT_ENABLE_TEST_CONTROLS":
+			return "1", true
+		default:
+			return "", false
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HookAddr != "127.0.0.1:18082" || !cfg.EnableTestControls {
+		t.Fatalf("hook = %s test = %v", cfg.HookAddr, cfg.EnableTestControls)
+	}
+	_, err = Load(func(key string) (string, bool) {
+		if key == "IOT_HOOK_ADDR" {
+			return "127.0.0.1:8080", true
+		}
+		return "", false
+	})
+	if err == nil || err.Error() != "invalid IOT_HOOK_ADDR" {
+		t.Fatalf("shared addr error = %v", err)
+	}
+	_, err = Load(func(key string) (string, bool) {
+		if key == "IOT_ENABLE_TEST_CONTROLS" {
+			return "yes", true
+		}
+		return "", false
+	})
+	if err == nil || err.Error() != "invalid IOT_ENABLE_TEST_CONTROLS" {
+		t.Fatalf("flag error = %v", err)
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.env")

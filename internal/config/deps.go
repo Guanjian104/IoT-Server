@@ -54,10 +54,18 @@ func finish(cfg Config, values map[string]string) (Config, error) {
 		cfg.CommandDeadline = deadline
 	}
 	if value := strings.TrimSpace(values["IOT_HOOK_ADDR"]); value != "" {
-		if err := validateLocalAddr(value, true); err != nil {
+		if err := validateLocalAddr(value, true); err != nil || value == cfg.HTTPAddr {
 			return Config{}, errors.New("invalid IOT_HOOK_ADDR")
 		}
 		cfg.HookAddr = value
+	}
+	switch strings.ToLower(strings.TrimSpace(values["IOT_ENABLE_TEST_CONTROLS"])) {
+	case "", "0", "false":
+		cfg.EnableTestControls = false
+	case "1", "true":
+		cfg.EnableTestControls = true
+	default:
+		return Config{}, errors.New("invalid IOT_ENABLE_TEST_CONTROLS")
 	}
 
 	mysql, mysqlOn, err := requireGroup(values, "IOT_MYSQL_ADDR", "IOT_MYSQL_USER", "IOT_MYSQL_PASSWORD", "IOT_MYSQL_DATABASE")

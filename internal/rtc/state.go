@@ -14,6 +14,41 @@ func AcceptEvent(current, event int64) bool {
 	return current > 0 && event == current
 }
 
+// SameRound 要求事件中的会话和轮次就是这路通话自己的。
+func SameRound(callSession string, callGeneration int64, eventSession string, eventGeneration int64) bool {
+	return callSession != "" && eventSession == callSession && AcceptEvent(callGeneration, eventGeneration)
+}
+
+// CanOperateCall 判断这个用户是不是这路通话里可以做该操作的人。
+// 主叫可以取消振铃并结束已接听的通话。被叫可以接听、拒绝，或在振铃时挂断。
+// 实际接听人可以结束自己接通后的通话。其他人即使有设备通话权限也不能操作。
+func CanOperateCall(actor, caller, callee, answeredBy int64, status, requested string) bool {
+	if actor <= 0 || caller <= 0 {
+		return false
+	}
+	switch requested {
+	case "accept", "reject":
+		return status == "RINGING" && callee > 0 && actor == callee && actor != caller
+	case "end":
+		switch status {
+		case "RINGING":
+			if actor == caller {
+				return true
+			}
+			return callee > 0 && actor == callee && actor != caller
+		case "ACCEPTED", "CONNECTED":
+			if actor == caller {
+				return true
+			}
+			return answeredBy > 0 && actor == answeredBy
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
 // NextSession 计算会话的下一个状态。mark 和 resume 在条件不足时保持原状态。
 func NextSession(from, event string, deviceReady, mediaReady bool) (string, error) {
 	switch event {
@@ -110,7 +145,8 @@ func NextCall(from, event string) (string, error) {
 			return "REJECTED", nil
 		}
 	case "timeout":
-		if from == "RINGING" {
+		switch from {
+		case "RINGING", "ACCEPTED":
 			return "TIMEOUT", nil
 		}
 	case "cancel":
@@ -132,12 +168,11 @@ func NextCall(from, event string) (string, error) {
 	return from, ErrState
 }
 
-// ViewerOccupies 判断观看者是否仍算作流的使用者。JOINING 只在宽限期内占用。
+// ViewerOccupies 判断观看者是否仍算作流的使用者。
+// JOINING 和 ACTIVE 都只在心跳宽限期内占用。心跳停了就不再占着会话。
 func ViewerOccupies(status string, age, grace time.Duration) bool {
 	switch status {
-	case "ACTIVE":
-		return true
-	case "JOINING":
+	case "ACTIVE", "JOINING":
 		return age >= 0 && age < grace
 	default:
 		return false

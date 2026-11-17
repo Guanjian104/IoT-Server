@@ -30,14 +30,17 @@ func TestP2ControlPlane(t *testing.T) {
 	}
 	logPath := filepath.Join(t.TempDir(), "server.log")
 	stop := startServer(t, bin, logPath, map[string]string{
-		"IOT_HTTP_ADDR":         "127.0.0.1:18080",
-		"IOT_INSTANCE_ID":       "iot-dev-1",
-		"IOT_STOP_DELAY":        "1s",
-		"IOT_VIEWER_JOIN_GRACE": "2s",
-		"IOT_CALL_RING_TIMEOUT": "2s",
+		"IOT_HTTP_ADDR":            "127.0.0.1:18080",
+		"IOT_HOOK_ADDR":            "127.0.0.1:18082",
+		"IOT_ENABLE_TEST_CONTROLS": "1",
+		"IOT_INSTANCE_ID":          "iot-dev-1",
+		"IOT_STOP_DELAY":           "1s",
+		"IOT_VIEWER_JOIN_GRACE":    "2s",
+		"IOT_CALL_RING_TIMEOUT":    "2s",
 	}, secrets)
 	t.Cleanup(stop)
 	base := "http://127.0.0.1:18080"
+	hook := "http://127.0.0.1:18082"
 	waitReady(t, base)
 	admin := login(t, base, "admin", os.Getenv("IOT_SEED_ADMIN_PASSWORD"), secrets)
 	operator := login(t, base, "operator", os.Getenv("IOT_SEED_OPERATOR_PASSWORD"), secrets)
@@ -66,7 +69,7 @@ func TestP2ControlPlane(t *testing.T) {
 	waitSession(t, base, operator, first.SessionID, func(view sessionView) bool {
 		return view.DeviceReady && !view.MediaReady && view.Status != "ACTIVE"
 	})
-	postEvent(t, base, secrets, first.SessionID, first.Generation, "media.track_published", "device:"+deviceID)
+	postEvent(t, hook, secrets, first.SessionID, first.Generation, "media.track_published", "device:"+deviceID)
 	waitSession(t, base, operator, first.SessionID, func(view sessionView) bool {
 		return view.Status == "ACTIVE" && view.MediaReady && view.Occupants >= 1
 	})
@@ -87,7 +90,7 @@ func TestP2ControlPlane(t *testing.T) {
 	if presence["track_ready"] != true || presence["rtc_connected"] != false || presence["mqtt_online"] != false {
 		t.Fatalf("presence mixed %v", presence)
 	}
-	postEvent(t, base, secrets, first.SessionID, first.Generation, "media.participant_joined", "device:"+deviceID)
+	postEvent(t, hook, secrets, first.SessionID, first.Generation, "media.participant_joined", "device:"+deviceID)
 	getJSON(t, base+"/api/v1/devices/"+deviceID+"/status", operator, &presence)
 	if presence["rtc_connected"] != true {
 		t.Fatal("device participant did not set rtc_connected")
@@ -126,13 +129,21 @@ func TestP2ControlPlane(t *testing.T) {
 	if next.Generation <= first.Generation {
 		t.Fatal("new round did not increase generation")
 	}
-	postEvent(t, base, secrets, first.SessionID, first.Generation, "media.room_closed", "")
-	postEvent(t, base, secrets, next.SessionID, first.Generation, "media.room_closed", "")
-	time.Sleep(400 * time.Millisecond)
-	if got := getSession(t, base, operator, next.SessionID); got.Status == "CLOSED" || got.Status == "FAILED" {
-		t.Fatal("old event closed the new session")
+	before := getSession(t, base, operator, next.SessionID)
+	closedBefore := getSession(t, base, operator, first.SessionID)
+	if before.MediaReady || before.Status == "ACTIVE" || closedBefore.Status != "CLOSED" {
+		t.Fatal("new session was already publishing")
 	}
-	postEvent(t, base, secrets, next.SessionID, next.Generation, "media.track_published", "track")
+	// track_published 会把媒体标成就绪。旧轮次打到新会话上不能产生这个变化。
+	postEvent(t, hook, secrets, next.SessionID, first.Generation, "media.track_published", "stale-track")
+	postEvent(t, hook, secrets, first.SessionID, first.Generation, "media.track_published", "stale-old")
+	got := getSession(t, base, operator, next.SessionID)
+	closed := getSession(t, base, operator, first.SessionID)
+	// 设备启动任务可以让新会话离开 WAITING_DEVICE。旧轨道事件不能把它标成媒体就绪或 ACTIVE。
+	if got.MediaReady || got.Status == "ACTIVE" || got.Status == "CLOSED" || got.Status == "FAILED" || got.Generation != next.Generation || closed.Status != closedBefore.Status || closed.MediaReady != closedBefore.MediaReady || closed.Generation != closedBefore.Generation {
+		t.Fatalf("old event changed the current session: status=%s media=%t generation=%d closed=%s closed_media=%t", got.Status, got.MediaReady, got.Generation, closed.Status, closed.MediaReady)
+	}
+	postEvent(t, hook, secrets, next.SessionID, next.Generation, "media.track_published", "track")
 	waitSession(t, base, operator, next.SessionID, func(view sessionView) bool { return view.Status == "ACTIVE" })
 	fresh := issueTicketRotate(t, base, admin, deviceID)
 	secrets = append(secrets, fresh)
@@ -189,7 +200,7 @@ func TestP2ControlPlane(t *testing.T) {
 	if postJSON(t, base+"/api/v1/calls/"+started.CallID+"/accept", operator, map[string]any{}, nil) != http.StatusOK {
 		t.Fatal("answerer could not accept")
 	}
-	postEvent(t, base, secrets, started.SessionID, started.Generation, "call.connected", started.CallID)
+	postEvent(t, hook, secrets, started.SessionID, started.Generation, "call.connected", started.CallID)
 	waitCall(t, base, operator, started.CallID, "CONNECTED")
 	retiredCall := callTicket
 	callTicket = issueTicketRotate(t, base, admin, callDevice)
@@ -228,6 +239,7 @@ func TestP2ControlPlane(t *testing.T) {
 	}
 
 	timeoutDevice := newDevice(t, base, admin)
+	grant(t, base, admin, timeoutDevice, "operator", "call")
 	timeoutTicket := issueTicket(t, base, admin, timeoutDevice)
 	secrets = append(secrets, timeoutTicket)
 	timed := doCall(t, base, admin, timeoutDevice, timeoutTicket)
@@ -241,29 +253,32 @@ func TestP2ControlPlane(t *testing.T) {
 	unknownTicket := issueTicket(t, base, admin, unknownDevice)
 	secrets = append(secrets, unknownTicket)
 	grant(t, base, admin, unknownDevice, "operator", "view")
-	putPlan(t, base, secrets, unknownDevice, "stop", "unknown")
+	putPlan(t, hook, secrets, unknownDevice, "stop", "unknown")
 	unknownWatch := doWatch(t, base, operator, unknownDevice, unknownTicket, "phone", "u1")
-	postEvent(t, base, secrets, unknownWatch.SessionID, unknownWatch.Generation, "media.track_published", "track")
+	postEvent(t, hook, secrets, unknownWatch.SessionID, unknownWatch.Generation, "media.track_published", "track")
 	waitSession(t, base, operator, unknownWatch.SessionID, func(view sessionView) bool { return view.Status == "ACTIVE" })
 	leave(t, base, operator, unknownWatch.ViewerID)
 	waitSession(t, base, operator, unknownWatch.SessionID, func(view sessionView) bool { return view.Status == "STOPPING" })
 	if postJSON(t, base+"/api/v1/devices/"+unknownDevice+"/watch", operator, watchBody(unknownTicket, "phone", "u2"), nil) != http.StatusConflict {
 		t.Fatal("watch started while stop result was unknown")
 	}
-	putPlan(t, base, secrets, unknownDevice, "status", "success")
+	putPlan(t, hook, secrets, unknownDevice, "status", "success")
 	waitSession(t, base, operator, unknownWatch.SessionID, func(view sessionView) bool { return view.Status == "CLOSED" })
 
 	log2 := filepath.Join(t.TempDir(), "server-2.log")
 	stop2 := startServer(t, bin, log2, map[string]string{
-		"IOT_HTTP_ADDR":         "127.0.0.1:18081",
-		"IOT_INSTANCE_ID":       "iot-dev-2",
-		"IOT_STOP_DELAY":        "1s",
-		"IOT_VIEWER_JOIN_GRACE": "2s",
-		"IOT_CALL_RING_TIMEOUT": "2s",
+		"IOT_HTTP_ADDR":            "127.0.0.1:18081",
+		"IOT_HOOK_ADDR":            "",
+		"IOT_ENABLE_TEST_CONTROLS": "0",
+		"IOT_INSTANCE_ID":          "iot-dev-2",
+		"IOT_STOP_DELAY":           "1s",
+		"IOT_VIEWER_JOIN_GRACE":    "2s",
+		"IOT_CALL_RING_TIMEOUT":    "2s",
 	}, secrets)
 	t.Cleanup(stop2)
 	waitReady(t, "http://127.0.0.1:18081")
 	dualDevice := newDevice(t, base, admin)
+	grant(t, base, admin, dualDevice, "operator", "call")
 	dualTicket := issueTicket(t, base, admin, dualDevice)
 	secrets = append(secrets, dualTicket)
 	dualStatus := make(chan int, 2)
@@ -357,7 +372,7 @@ func watchBody(ticket, clientID, key string) map[string]any {
 }
 
 func callBody(ticket string) map[string]any {
-	return map[string]any{"ticket": ticket, "channel_id": "1", "stream_type": "av", "resolution": ""}
+	return map[string]any{"ticket": ticket, "callee": "operator", "channel_id": "1", "stream_type": "av", "resolution": ""}
 }
 
 func doWatch(t *testing.T, base, token, deviceID, ticket, clientID, key string) watchResult {

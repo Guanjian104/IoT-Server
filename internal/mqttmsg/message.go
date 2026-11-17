@@ -221,9 +221,10 @@ func CanonicalSet(msgID string, now int64, identifier string, value bool) ([]byt
 	return payload, nil
 }
 
-// ReplyState 把应答码映射到命令终态。只有 sending 和 sent 可以迁移。
+// ReplyState 把应答码映射到命令终态。sending、sent 和 uncertain 可以收敛。
+// uncertain 收到回执说明命令已经到达设备，按回执收成成功或失败，不再保持不确定。
 func ReplyState(current string, code int) (string, bool) {
-	if current != "sending" && current != "sent" {
+	if current != "sending" && current != "sent" && current != "uncertain" {
 		return current, false
 	}
 	if code == 0 {

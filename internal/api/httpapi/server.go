@@ -66,15 +66,25 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/devices/{id}/properties", s.getProperties)
 	mux.HandleFunc("POST /api/v1/devices/{id}/commands", s.createCommand)
 	mux.HandleFunc("GET /api/v1/commands/{commandID}", s.getCommand)
+	mux.HandleFunc("POST /api/v1/commands/{commandID}/retry", s.retryCommand)
+	mux.HandleFunc("POST /api/v1/commands/{commandID}/close", s.closeCommand)
 	mux.HandleFunc("POST /api/v1/devices/{id}/grants", s.putGrant)
 	mux.HandleFunc("DELETE /api/v1/devices/{id}/grants", s.deleteGrant)
 	mux.HandleFunc("POST /api/v1/devices/{id}/disable", s.disableDevice)
 	mux.HandleFunc("POST /api/v1/devices/{id}/enable", s.enableDevice)
 	mux.HandleFunc("POST /api/v1/devices/{id}/revoke", s.revokeDevice)
-	mux.HandleFunc("POST /internal/mqtt/auth", s.mqttAuth)
-	mux.HandleFunc("POST /internal/mqtt/acl", s.mqttACL)
 	mux.HandleFunc("GET /metrics", s.metricsText)
 	s.registerRTC(mux)
+}
+
+// RegisterHook 只挂内部回调。测试控制入口要单独打开，并且不会出现在业务监听上。
+func (s *Server) RegisterHook(mux *http.ServeMux, testControls bool) {
+	mux.HandleFunc("POST /internal/mqtt/auth", s.mqttAuth)
+	mux.HandleFunc("POST /internal/mqtt/acl", s.mqttACL)
+	mux.HandleFunc("POST /internal/media/events", s.mediaEvent)
+	if testControls {
+		mux.HandleFunc("PUT /internal/rtc/plan", s.putPlan)
+	}
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -293,17 +303,61 @@ func (s *Server) getCommand(w http.ResponseWriter, r *http.Request) {
 	if !s.allow(w, r, user, command.DeviceID, "read") {
 		return
 	}
-	body := map[string]any{
-		"command_id": command.ID,
-		"device_id":  command.DeviceID,
-		"msg_id":     command.MsgID,
-		"state":      command.State,
-		"attempts":   command.Attempts,
+	writeJSON(w, http.StatusOK, commandBody(command))
+}
+
+func (s *Server) retryCommand(w http.ResponseWriter, r *http.Request) {
+	s.recoverCommand(w, r, true)
+}
+
+func (s *Server) closeCommand(w http.ResponseWriter, r *http.Request) {
+	s.recoverCommand(w, r, false)
+}
+
+// recoverCommand 处理不确定或需要人工介入的命令。
+// retry 会再次发布同一条载荷；close 收成 failed，表示人工确认不再执行。
+func (s *Server) recoverCommand(w http.ResponseWriter, r *http.Request, retry bool) {
+	user, ok := s.user(w, r)
+	if !ok {
+		return
 	}
-	if command.ReplyCode != nil {
-		body["reply_code"] = *command.ReplyCode
+	commandID := r.PathValue("commandID")
+	current, err := s.store.GetCommand(r.Context(), user.TenantID, commandID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
 	}
-	writeJSON(w, http.StatusOK, body)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	if !s.allow(w, r, user, current.DeviceID, "manage") {
+		return
+	}
+	var command store.Command
+	if retry {
+		command, err = s.store.RetryCommand(r.Context(), user.TenantID, commandID, time.Now().Add(s.deadline))
+	} else {
+		command, err = s.store.CloseCommand(r.Context(), user.TenantID, commandID)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if errors.Is(err, store.ErrConflict) {
+		writeError(w, http.StatusConflict, "conflict")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	action := "close"
+	if retry {
+		action = "retry"
+	}
+	s.log.Info("command recovered", "request_id", requestID(r), "command_id", command.ID, "action", action, "state", command.State)
+	writeJSON(w, http.StatusOK, commandBody(command))
 }
 
 func (s *Server) putGrant(w http.ResponseWriter, r *http.Request) {
@@ -497,6 +551,20 @@ func devicesJSON(items []store.Device) []map[string]any {
 		out = append(out, deviceJSON(item))
 	}
 	return out
+}
+
+func commandBody(command store.Command) map[string]any {
+	body := map[string]any{
+		"command_id": command.ID,
+		"device_id":  command.DeviceID,
+		"msg_id":     command.MsgID,
+		"state":      command.State,
+		"attempts":   command.Attempts,
+	}
+	if command.ReplyCode != nil {
+		body["reply_code"] = *command.ReplyCode
+	}
+	return body
 }
 
 func deviceJSON(device store.Device) map[string]any {

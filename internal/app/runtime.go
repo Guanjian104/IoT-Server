@@ -70,11 +70,26 @@ func boot(ctx context.Context, cfg config.Config, log logger.Logger) (*runtime, 
 }
 
 func (rt *runtime) Mount(mux *http.ServeMux) {
-	if rt == nil || rt.store == nil {
+	api := rt.api()
+	if api == nil {
 		return
 	}
-	api := httpapi.New(rt.store, rt.log, rt.metrics, rt.cfg.TenantID, rt.cfg.MQTTHookToken, rt.cfg.MQTTServicePass, rt.cfg.MQTTDevicePass, rt.cfg.CommandDeadline, rt.kicker)
 	api.Register(mux)
+}
+
+func (rt *runtime) MountHook(mux *http.ServeMux) {
+	api := rt.api()
+	if api == nil {
+		return
+	}
+	api.RegisterHook(mux, rt.cfg.EnableTestControls)
+}
+
+func (rt *runtime) api() *httpapi.Server {
+	if rt == nil || rt.store == nil {
+		return nil
+	}
+	return httpapi.New(rt.store, rt.log, rt.metrics, rt.cfg.TenantID, rt.cfg.MQTTHookToken, rt.cfg.MQTTServicePass, rt.cfg.MQTTDevicePass, rt.cfg.CommandDeadline, rt.kicker)
 }
 
 func (rt *runtime) watch(ctx context.Context, gate *readyGate) {

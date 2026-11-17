@@ -42,6 +42,7 @@ func TestP1IsolatedLoop(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "server.log")
 	stop := startServer(t, bin, logPath, map[string]string{
 		"IOT_HTTP_ADDR":   "127.0.0.1:18080",
+		"IOT_HOOK_ADDR":   "127.0.0.1:18082",
 		"IOT_INSTANCE_ID": "iot-dev-1",
 	}, secrets)
 	t.Cleanup(stop)
@@ -185,6 +186,7 @@ func TestP1IsolatedLoop(t *testing.T) {
 	log2 := filepath.Join(t.TempDir(), "server-2.log")
 	stop2 := startServer(t, bin, log2, map[string]string{
 		"IOT_HTTP_ADDR":   "127.0.0.1:18081",
+		"IOT_HOOK_ADDR":   "",
 		"IOT_INSTANCE_ID": "iot-dev-2",
 	}, secrets)
 	t.Cleanup(stop2)
@@ -201,7 +203,7 @@ func TestP1IsolatedLoop(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		postAuth(t, base, os.Getenv("IOT_MQTT_HOOK_TOKEN"))
+		postAuth(t, "http://127.0.0.1:18082", os.Getenv("IOT_MQTT_HOOK_TOKEN"))
 	}
 	waitLog(t, logPath, "mqtt_auth_deny_spike", secrets)
 	metricsBody := getRaw(t, base+"/metrics")
@@ -333,6 +335,7 @@ func childEnv(overrides map[string]string) []string {
 		"IOT_MQTT_SERVICE_PASSWORD", "IOT_MQTT_DEVICE_USERNAME", "IOT_MQTT_DEVICE_PASSWORD", "IOT_MQTT_HOOK_TOKEN",
 		"IOT_EMQX_API_URL", "IOT_EMQX_API_USER", "IOT_EMQX_API_PASSWORD", "IOT_SEED_ADMIN_PASSWORD", "IOT_SEED_OPERATOR_PASSWORD",
 		"IOT_STOP_DELAY", "IOT_VIEWER_JOIN_GRACE", "IOT_CALL_RING_TIMEOUT",
+		"IOT_HOOK_ADDR", "IOT_ENABLE_TEST_CONTROLS",
 	}
 	env := []string{"TZ=UTC", "GOTOOLCHAIN=local"}
 	for _, key := range keys {
@@ -740,8 +743,10 @@ func assertTokenDenied(t *testing.T, opts *mqtt.ClientOptions, secrets []string)
 	token := client.Connect()
 	ok := token.WaitTimeout(8 * time.Second)
 	err := token.Error()
+	// 先记下连接结果，再断开。断开后的 IsConnected 不能当作认证被拒绝。
+	connected := client.IsConnected()
 	client.Disconnect(50)
-	if ok && err == nil && client.IsConnected() {
+	if ok && err == nil && connected {
 		t.Fatal("connection was allowed")
 	}
 	if err != nil && leaked(err.Error(), secrets) {

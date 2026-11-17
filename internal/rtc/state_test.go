@@ -74,6 +74,21 @@ func TestViewerAndCall(t *testing.T) {
 	if err != nil || ended != "TIMEOUT" {
 		t.Fatal(ended, err)
 	}
+	if next, err := NextCall("ACCEPTED", "timeout"); err != nil || next != "TIMEOUT" {
+		t.Fatal(next, err)
+	}
+	if !SameRound("s1", 2, "s1", 2) || SameRound("s1", 2, "s2", 2) || SameRound("s1", 2, "s1", 1) {
+		t.Fatal("call round")
+	}
+	if !CanOperateCall(2, 1, 2, 0, "RINGING", "accept") || CanOperateCall(1, 1, 2, 0, "RINGING", "accept") || CanOperateCall(3, 1, 2, 0, "RINGING", "accept") {
+		t.Fatal("accept party")
+	}
+	if !CanOperateCall(2, 1, 2, 0, "RINGING", "reject") || CanOperateCall(3, 1, 2, 0, "RINGING", "end") {
+		t.Fatal("reject party")
+	}
+	if !CanOperateCall(1, 1, 2, 0, "RINGING", "end") || !CanOperateCall(2, 1, 2, 2, "CONNECTED", "end") || CanOperateCall(3, 1, 2, 2, "CONNECTED", "end") {
+		t.Fatal("end party")
+	}
 	if _, err = NextCall(ended, "end"); err != ErrState {
 		t.Fatal("terminal call moved")
 	}
@@ -86,7 +101,10 @@ func TestOccupancyAndGeneration(t *testing.T) {
 	if ViewerOccupies("JOINING", 2*time.Second, 2*time.Second) || ViewerOccupies("LEFT", 0, time.Second) || ViewerOccupies("DISCONNECTED", 0, time.Second) {
 		t.Fatal("non occupant counted")
 	}
-	if !ViewerOccupies("ACTIVE", 10*time.Hour, time.Second) || !CallOccupies("RINGING") || CallOccupies("ENDED") {
+	if !ViewerOccupies("ACTIVE", time.Second, 2*time.Second) {
+		t.Fatal("fresh active viewer")
+	}
+	if ViewerOccupies("ACTIVE", 10*time.Hour, time.Second) || !CallOccupies("RINGING") || CallOccupies("ENDED") {
 		t.Fatal("occupant rule")
 	}
 	if AcceptEvent(2, 1) || !AcceptEvent(2, 2) || AcceptEvent(0, 0) {

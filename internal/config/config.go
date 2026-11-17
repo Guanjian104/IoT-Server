@@ -19,37 +19,38 @@ type Lookup func(key string) (string, bool)
 
 // Config 是进程运行配置。密钥字段只存在于内存，日志经调用方脱敏。
 type Config struct {
-	HTTPAddr         string
-	HookAddr         string
-	InstanceID       string
-	ConfigVersion    string
-	LogLevel         string
-	ShutdownTimeout  time.Duration
-	TenantID         string
-	CommandDeadline  time.Duration
-	MySQLAddr        string
-	MySQLUser        string
-	MySQLPassword    string
-	MySQLDatabase    string
-	RedisAddr        string
-	RedisPassword    string
-	MQTTBrokerURL    string
-	MQTTServiceUser  string
-	MQTTServicePass  string
-	MQTTDeviceUser   string
-	MQTTDevicePass   string
-	MQTTHookToken    string
-	EMQXAPIURL       string
-	EMQXAPIUser      string
-	EMQXAPIPassword  string
-	SeedAdminPass    string
-	SeedOperatorPass string
-	StopDelay        time.Duration
-	JoinGrace        time.Duration
-	RingTimeout      time.Duration
-	mysqlEnabled     bool
-	redisEnabled     bool
-	mqttEnabled      bool
+	HTTPAddr           string
+	HookAddr           string
+	InstanceID         string
+	ConfigVersion      string
+	LogLevel           string
+	ShutdownTimeout    time.Duration
+	TenantID           string
+	CommandDeadline    time.Duration
+	MySQLAddr          string
+	MySQLUser          string
+	MySQLPassword      string
+	MySQLDatabase      string
+	RedisAddr          string
+	RedisPassword      string
+	MQTTBrokerURL      string
+	MQTTServiceUser    string
+	MQTTServicePass    string
+	MQTTDeviceUser     string
+	MQTTDevicePass     string
+	MQTTHookToken      string
+	EMQXAPIURL         string
+	EMQXAPIUser        string
+	EMQXAPIPassword    string
+	SeedAdminPass      string
+	SeedOperatorPass   string
+	StopDelay          time.Duration
+	JoinGrace          time.Duration
+	RingTimeout        time.Duration
+	EnableTestControls bool
+	mysqlEnabled       bool
+	redisEnabled       bool
+	mqttEnabled        bool
 }
 
 var knownKeys = []string{
@@ -82,6 +83,7 @@ var knownKeys = []string{
 	"IOT_STOP_DELAY",
 	"IOT_VIEWER_JOIN_GRACE",
 	"IOT_CALL_RING_TIMEOUT",
+	"IOT_ENABLE_TEST_CONTROLS",
 }
 
 var keyPattern = regexp.MustCompile(`^IOT_[A-Z0-9_]{1,64}$`)

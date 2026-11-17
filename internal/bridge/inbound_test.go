@@ -125,3 +125,47 @@ func TestLaneDoesNotBlockOnWaitingReply(t *testing.T) {
 	}
 	t.Fatal("following message stayed behind a waiting reply")
 }
+
+func TestLaneCapsAndIsolatesPoison(t *testing.T) {
+	lane := newLane()
+	for i := 0; i < laneCap; i++ {
+		if !lane.add(delivery{topic: "t", body: []byte{byte(i)}, hash: string(rune(i)) + "x"}) {
+			t.Fatal("capacity rejected an empty slot")
+		}
+	}
+	if lane.add(delivery{topic: "overflow", body: []byte("z"), hash: "overflow"}) {
+		t.Fatal("queue grew past its cap")
+	}
+	if !lane.add(delivery{topic: "t", body: []byte{0}, hash: string(rune(0)) + "x", ack: func() {}}) {
+		t.Fatal("duplicate was counted again")
+	}
+
+	isolated := newLane()
+	acked := make(chan struct{})
+	isolated.isolate = func(delivery) bool { return true }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		isolated.run(ctx, func(string, []byte) error { return errors.New("bad") }, time.Millisecond, nil)
+		close(done)
+	}()
+	isolated.add(delivery{topic: "bad", body: []byte("p"), ack: func() {
+		select {
+		case <-acked:
+		default:
+			close(acked)
+		}
+	}})
+	select {
+	case <-acked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("poison message was not isolated")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("lane did not stop")
+	}
+}

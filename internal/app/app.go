@@ -63,34 +63,34 @@ func Run(ctx context.Context, opt Options) error {
 		BuildVersion:  buildinfo.Version,
 		Revision:      buildinfo.Revision,
 	}
-	server := &http.Server{
-		Handler:           router.New(state, meta, rt.Mount),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	public := newServer(router.New(state, meta, rt.Mount))
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
 		log.Error("listen failed", "config_key", "IOT_HTTP_ADDR")
 		return errors.New("listen failed")
 	}
-	listeners := []net.Listener{listener}
-	if cfg.HookAddr != "" && cfg.HookAddr != cfg.HTTPAddr {
-		hookListener, hookErr := net.Listen("tcp", cfg.HookAddr)
-		if hookErr != nil {
+	servers := []*http.Server{public}
+	hookMux := http.NewServeMux()
+	rt.MountHook(hookMux)
+	var hookListener net.Listener
+	if cfg.HookAddr != "" {
+		hookListener, err = net.Listen("tcp", cfg.HookAddr)
+		if err != nil {
 			listener.Close()
 			log.Error("listen failed", "config_key", "IOT_HOOK_ADDR")
 			return errors.New("listen failed")
 		}
-		listeners = append(listeners, hookListener)
+		servers = append(servers, newServer(hookMux))
 	}
 
-	errCh := make(chan error, len(listeners))
-	for _, ln := range listeners {
-		ln := ln
+	errCh := make(chan error, len(servers))
+	go func() {
+		errCh <- public.Serve(listener)
+	}()
+	if hookListener != nil {
+		hook := servers[1]
 		go func() {
-			errCh <- server.Serve(ln)
+			errCh <- hook.Serve(hookListener)
 		}()
 	}
 	if !cfg.Dependencies() {
@@ -99,13 +99,16 @@ func Run(ctx context.Context, opt Options) error {
 		go rt.watch(ctx, gate)
 	}
 	log.Info("http listening", "addr", listener.Addr().String())
+	if hookListener != nil {
+		log.Info("hook listening", "addr", hookListener.Addr().String())
+	}
 	if opt.OnListening != nil {
 		opt.OnListening(listener.Addr())
 	}
 
 	select {
 	case <-ctx.Done():
-		return shutdown(server, gate, cfg.ShutdownTimeout, log, opt.OnBeforeShutdown, errCh, len(listeners))
+		return shutdown(servers, gate, cfg.ShutdownTimeout, log, opt.OnBeforeShutdown, errCh)
 	case err := <-errCh:
 		gate.Close()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -116,7 +119,17 @@ func Run(ctx context.Context, opt Options) error {
 	}
 }
 
-func shutdown(server *http.Server, gate *readyGate, timeout time.Duration, log logger.Logger, before func(), errCh <-chan error, listeners int) error {
+func newServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+}
+
+func shutdown(servers []*http.Server, gate *readyGate, timeout time.Duration, log logger.Logger, before func(), errCh <-chan error) error {
 	gate.Close()
 	log.Info("server shutting down")
 	if before != nil {
@@ -124,9 +137,14 @@ func shutdown(server *http.Server, gate *readyGate, timeout time.Duration, log l
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	shutErr := server.Shutdown(shutdownCtx)
+	var shutErr error
+	for _, server := range servers {
+		if err := server.Shutdown(shutdownCtx); err != nil && shutErr == nil {
+			shutErr = err
+		}
+	}
 	var serveErr error
-	for i := 0; i < listeners; i++ {
+	for i := 0; i < len(servers); i++ {
 		err := <-errCh
 		if err != nil && !errors.Is(err, http.ErrServerClosed) && serveErr == nil {
 			serveErr = err

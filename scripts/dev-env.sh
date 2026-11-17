@@ -19,6 +19,7 @@ hook=$(hex)
 cookie=$(hex)
 cat > .env <<EOF
 IOT_HTTP_ADDR=127.0.0.1:18080
+IOT_HOOK_ADDR=127.0.0.1:18082
 IOT_INSTANCE_ID=iot-dev-1
 IOT_CONFIG_VERSION=p1
 IOT_LOG_LEVEL=info

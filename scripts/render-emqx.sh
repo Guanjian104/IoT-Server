@@ -10,6 +10,11 @@ set -a
 # shellcheck disable=SC1091
 . ./.env
 set +a
+if [ -z "${IOT_HOOK_ADDR:-}" ]; then
+  echo "missing IOT_HOOK_ADDR" >&2
+  exit 1
+fi
+hook_port=${IOT_HOOK_ADDR##*:}
 hex='^[0-9a-fA-F]{32,}$'
 for value in "$IOT_MQTT_HOOK_TOKEN" "$EMQX_NODE_COOKIE" "$EMQX_DEV_DASHBOARD_PASSWORD"; do
   printf '%s\n' "$value" | grep -Eq "$hex"
@@ -62,13 +67,19 @@ sys_topics {
   }
 }
 
+authentication_settings {
+  node_cache {
+    enable = false
+  }
+}
+
 authentication = [
   {
     mechanism = password_based
     backend = http
     enable = true
     method = post
-    url = "http://host.docker.internal:18080/internal/mqtt/auth"
+    url = "http://host.docker.internal:${hook_port}/internal/mqtt/auth"
     headers {
       "content-type" = "application/json"
       "x-iot-hook-token" = "${IOT_MQTT_HOOK_TOKEN}"
@@ -97,12 +108,15 @@ authentication = [
 authorization {
   no_match = deny
   deny_action = disconnect
+  node_cache {
+    enable = false
+  }
   sources = [
     {
       type = http
       enable = true
       method = post
-      url = "http://host.docker.internal:18080/internal/mqtt/acl"
+      url = "http://host.docker.internal:${hook_port}/internal/mqtt/acl"
       headers {
         "content-type" = "application/json"
         "x-iot-hook-token" = "${IOT_MQTT_HOOK_TOKEN}"

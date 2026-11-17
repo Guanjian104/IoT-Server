@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"regexp"
+	"sort"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -108,6 +109,8 @@ type CallView struct {
 	Status     string
 	Generation int64
 	CallerID   int64
+	CalleeID   int64
+	AnsweredBy int64
 }
 
 type sessionRow struct {
@@ -130,6 +133,15 @@ type rtcTask struct {
 	BusinessID string
 	Generation int64
 	Attempts   int
+	Owner      string
+	Token      int64
+}
+
+// errLeaseLost 表示这轮租约已经不属于当前执行者。旧结果必须整笔回滚。
+var errLeaseLost = errors.New("lease")
+
+func ownsLease(status, owner string, token int64, task rtcTask) bool {
+	return status == "leased" && task.Owner != "" && owner == task.Owner && task.Token > 0 && token == task.Token
 }
 
 // IssueTicket 创建当前有效票据。库里只保存摘要。
@@ -153,7 +165,7 @@ func (s *Store) writeTicket(ctx context.Context, user User, deviceID string, rot
 	expires := time.Now().UTC().Add(12 * time.Hour)
 	var issued TicketIssue
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
-		if err := lockDevice(tx, ctx, user.TenantID, deviceID); err != nil {
+		if err := requireOpenDevice(tx, ctx, user.TenantID, deviceID); err != nil {
 			return err
 		}
 		if err := permit(ctx, tx, user, deviceID, "ticket"); err != nil {
@@ -204,7 +216,7 @@ func (s *Store) Watch(ctx context.Context, user User, deviceID, ticket, clientID
 	}
 	var result WatchResult
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		if err := lockDevice(tx, ctx, user.TenantID, deviceID); err != nil {
+		if err := requireOpenDevice(tx, ctx, user.TenantID, deviceID); err != nil {
 			return err
 		}
 		if err := permit(ctx, tx, user, deviceID, "view"); err != nil {
@@ -343,9 +355,9 @@ func (s *Store) GetSession(ctx context.Context, user User, sessionID string) (Se
 	return view, err
 }
 
-// StartCall 在同一事务里占住设备主通话并创建会话。
-func (s *Store) StartCall(ctx context.Context, user User, deviceID, ticket, channel, stream, resolution string) (CallResult, error) {
-	if !validStream(channel, stream, resolution) {
+// StartCall 在同一事务里占住设备主通话并创建会话。callee 是这路通话指定的接听人。
+func (s *Store) StartCall(ctx context.Context, user User, deviceID, ticket, calleeName, channel, stream, resolution string) (CallResult, error) {
+	if calleeName == "" || len(calleeName) > 64 || !validStream(channel, stream, resolution) {
 		return CallResult{}, ErrInvalid
 	}
 	caps := (media.TestProvider{}).Capabilities()
@@ -355,13 +367,23 @@ func (s *Store) StartCall(ctx context.Context, user User, deviceID, ticket, chan
 	_, _, ring, _ := s.delays()
 	var result CallResult
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		if err := lockDevice(tx, ctx, user.TenantID, deviceID); err != nil {
+		if err := requireOpenDevice(tx, ctx, user.TenantID, deviceID); err != nil {
 			return err
 		}
 		if err := permit(ctx, tx, user, deviceID, "call"); err != nil {
 			return err
 		}
 		if err := s.lockTicket(ctx, tx, user.TenantID, deviceID, ticket); err != nil {
+			return err
+		}
+		callee, err := s.userByName(ctx, user.TenantID, calleeName)
+		if err != nil {
+			return err
+		}
+		if callee.Status != "active" || callee.ID == user.ID {
+			return ErrForbidden
+		}
+		if err := permit(ctx, tx, callee, deviceID, "call"); err != nil {
 			return err
 		}
 		callID, err := randomID("c")
@@ -379,8 +401,8 @@ func (s *Store) StartCall(ctx context.Context, user User, deviceID, ticket, chan
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO rtc_call (tenant_id, call_id, device_id, session_id, caller_user_id, status, generation)
-			VALUES (?, ?, ?, ?, ?, 'RINGING', ?)`, user.TenantID, callID, deviceID, row.SessionID, user.ID, row.Generation); err != nil {
+			INSERT INTO rtc_call (tenant_id, call_id, device_id, session_id, caller_user_id, callee_user_id, status, generation)
+			VALUES (?, ?, ?, ?, ?, ?, 'RINGING', ?)`, user.TenantID, callID, deviceID, row.SessionID, user.ID, callee.ID, row.Generation); err != nil {
 			return s.unavailable("call", err)
 		}
 		if err := s.enqueue(ctx, tx, user.TenantID, "call_timeout", callID, row.Generation, time.Now().UTC().Add(ring)); err != nil {
@@ -395,17 +417,17 @@ func (s *Store) StartCall(ctx context.Context, user User, deviceID, ticket, chan
 	return result, err
 }
 
-// AcceptCall 只允许主叫以外、持有 call 权限的用户接听。
+// AcceptCall 只允许这路通话指定的被叫接听。
 func (s *Store) AcceptCall(ctx context.Context, user User, callID string) error {
 	return s.moveCall(ctx, user, callID, "accept", false)
 }
 
-// RejectCall 只允许预期接听主体拒绝。
+// RejectCall 只允许这路通话指定的被叫拒绝。
 func (s *Store) RejectCall(ctx context.Context, user User, callID string) error {
 	return s.moveCall(ctx, user, callID, "reject", false)
 }
 
-// EndCall 由主叫取消振铃，或由通话参与方结束已接听的通话。
+// EndCall 由主叫取消或挂断，振铃中的被叫可以拒绝，接通后的实际接听人也可以挂断。
 func (s *Store) EndCall(ctx context.Context, user User, callID string) error {
 	return s.moveCall(ctx, user, callID, "end", true)
 }
@@ -508,7 +530,7 @@ func (s *Store) ApplyMediaEvent(ctx context.Context, tenant, eventID, eventType,
 		case "media.room_closed":
 			err = nil
 		case "call.connected":
-			err = s.connectCall(ctx, tx, tenant, identity, generation)
+			err = s.connectCall(ctx, tx, tenant, sessionID, identity, generation)
 		default:
 			err = ErrInvalid
 		}
@@ -566,14 +588,31 @@ func (s *Store) MaintainRTC(ctx context.Context, owner string) error {
 		}
 		_, _, _, lease := s.delays()
 		until := time.Now().UTC().Add(lease)
+		claimed := make([]rtcTask, 0, len(tasks))
 		for i := range tasks {
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE rtc_task SET status = 'leased', attempts = attempts + 1, lease_owner = ?, lease_until = ?
-				WHERE task_id = ? AND status = 'pending'`, owner, until, tasks[i].ID); err != nil {
+			res, err := tx.ExecContext(ctx, `
+				UPDATE rtc_task SET status = 'leased', attempts = attempts + 1, lease_owner = ?, lease_until = ?,
+				lease_token = lease_token + 1
+				WHERE task_id = ? AND status = 'pending'`, owner, until, tasks[i].ID)
+			if err != nil {
+				return s.unavailable("task", err)
+			}
+			n, _ := res.RowsAffected()
+			if n != 1 {
+				continue
+			}
+			var token int64
+			var held string
+			if err := tx.QueryRowContext(ctx, `
+				SELECT lease_owner, lease_token FROM rtc_task WHERE task_id = ?`, tasks[i].ID).Scan(&held, &token); err != nil {
 				return s.unavailable("task", err)
 			}
 			tasks[i].Attempts++
+			tasks[i].Owner = held
+			tasks[i].Token = token
+			claimed = append(claimed, tasks[i])
 		}
+		tasks = claimed
 		return nil
 	})
 	if err != nil {
@@ -601,15 +640,18 @@ func (s *Store) execTask(ctx context.Context, task rtcTask) error {
 	case "expire_viewers":
 		return s.execExpire(ctx, task)
 	default:
-		return s.finishTask(ctx, task.ID, "done", "")
+		return s.finishTask(ctx, task, "done", "")
 	}
 }
 
 func (s *Store) execStart(ctx context.Context, task rtcTask) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.guardTask(ctx, tx, task); err != nil {
+			return err
+		}
 		row, err := peekSession(ctx, tx, task.BusinessID)
 		if errors.Is(err, ErrNotFound) {
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "stale")
+			return s.finishTaskTx(ctx, tx, task, "done", "stale")
 		}
 		if err != nil {
 			return err
@@ -622,7 +664,40 @@ func (s *Store) execStart(ctx context.Context, task rtcTask) error {
 			return err
 		}
 		if row.Generation != task.Generation || (row.Status != "WAITING_DEVICE" && row.Status != "STREAM_STARTING") {
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "stale")
+			return s.finishTaskTx(ctx, tx, task, "done", "stale")
+		}
+		open, err := deviceIsOpen(tx, ctx, row.tenant, row.DeviceID)
+		if err != nil {
+			return err
+		}
+		if !open {
+			if err := s.failStartup(ctx, tx, row); err != nil {
+				return err
+			}
+			return s.finishTaskTx(ctx, tx, task, "done", "disabled")
+		}
+		fenced, err := s.hasFence(ctx, tx, row)
+		if err != nil {
+			return err
+		}
+		if fenced {
+			switch status, err := s.streamStatus(ctx, tx, row.tenant, row.DeviceID); {
+			case err != nil:
+				return err
+			case status == "success":
+				return s.openMedia(ctx, tx, row, task)
+			case status == "fail":
+				row, err = s.saveSession(ctx, tx, row, "fail")
+				if err != nil {
+					return err
+				}
+				if err := s.releaseHold(ctx, tx, row); err != nil {
+					return err
+				}
+				return s.finishTaskTx(ctx, tx, task, "done", "fail")
+			default:
+				return s.holdUnknown(ctx, tx, task)
+			}
 		}
 		outcome, err := s.plan(ctx, tx, row.tenant, row.DeviceID, "start")
 		if err != nil {
@@ -630,29 +705,7 @@ func (s *Store) execStart(ctx context.Context, task rtcTask) error {
 		}
 		switch outcome {
 		case "success":
-			var provider media.TestProvider
-			room, err := provider.CreateRoom(ctx, media.RoomRequest{SessionID: row.SessionID, Generation: row.Generation})
-			if err != nil {
-				return err
-			}
-			if err := s.mapRoom(ctx, tx, row, room.ID); err != nil {
-				_ = provider.DeleteRoom(ctx, room.ID)
-				return err
-			}
-			row.DeviceReady = true
-			if row.Status == "WAITING_DEVICE" {
-				row, err = s.saveSession(ctx, tx, row, "start")
-				if err != nil {
-					return err
-				}
-			}
-			if _, err = s.saveSession(ctx, tx, row, "mark"); err != nil {
-				return err
-			}
-			if err := s.syncPresence(ctx, tx, row.tenant, row.DeviceID); err != nil {
-				return err
-			}
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "")
+			return s.openMedia(ctx, tx, row, task)
 		case "fail":
 			row, err = s.saveSession(ctx, tx, row, "fail")
 			if err != nil {
@@ -661,12 +714,12 @@ func (s *Store) execStart(ctx context.Context, task rtcTask) error {
 			if err := s.releaseHold(ctx, tx, row); err != nil {
 				return err
 			}
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "fail")
+			return s.finishTaskTx(ctx, tx, task, "done", "fail")
 		case "unknown":
 			if err := s.raiseFence(ctx, tx, row, task.ID); err != nil {
 				return err
 			}
-			return s.finishTaskTx(ctx, tx, task.ID, "needs_attention", "unknown")
+			return s.holdUnknown(ctx, tx, task)
 		default:
 			return errors.New("timeout")
 		}
@@ -676,9 +729,12 @@ func (s *Store) execStart(ctx context.Context, task rtcTask) error {
 func (s *Store) execStop(ctx context.Context, task rtcTask) error {
 	_, grace, _, _ := s.delays()
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.guardTask(ctx, tx, task); err != nil {
+			return err
+		}
 		row, err := peekSession(ctx, tx, task.BusinessID)
 		if errors.Is(err, ErrNotFound) {
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "stale")
+			return s.finishTaskTx(ctx, tx, task, "done", "stale")
 		}
 		if err != nil {
 			return err
@@ -691,7 +747,7 @@ func (s *Store) execStop(ctx context.Context, task rtcTask) error {
 			return err
 		}
 		if row.Generation != task.Generation {
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "stale")
+			return s.finishTaskTx(ctx, tx, task, "done", "stale")
 		}
 		count, err := s.occupants(ctx, tx, row.tenant, row.SessionID, grace)
 		if err != nil {
@@ -703,7 +759,7 @@ func (s *Store) execStop(ctx context.Context, task rtcTask) error {
 					return err
 				}
 			}
-			return s.finishTaskTx(ctx, tx, task.ID, "cancelled", "occupant")
+			return s.finishTaskTx(ctx, tx, task, "cancelled", "occupant")
 		}
 		fenced, err := s.hasFence(ctx, tx, row)
 		if err != nil {
@@ -719,7 +775,7 @@ func (s *Store) execStop(ctx context.Context, task rtcTask) error {
 				}
 				return errors.New("unknown")
 			}
-			return s.closeHeld(ctx, tx, row, task.ID)
+			return s.closeHeld(ctx, tx, row, task)
 		}
 		if row.Status == "ACTIVE" {
 			row, err = s.saveSession(ctx, tx, row, "empty")
@@ -734,10 +790,10 @@ func (s *Store) execStop(ctx context.Context, task rtcTask) error {
 			}
 		}
 		if row.Status != "STOPPING" && row.Status != "CLOSED" {
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "stale")
+			return s.finishTaskTx(ctx, tx, task, "done", "stale")
 		}
 		if row.Status == "CLOSED" {
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "")
+			return s.finishTaskTx(ctx, tx, task, "done", "")
 		}
 		outcome, err := s.plan(ctx, tx, row.tenant, row.DeviceID, "stop")
 		if err != nil {
@@ -745,18 +801,12 @@ func (s *Store) execStop(ctx context.Context, task rtcTask) error {
 		}
 		switch outcome {
 		case "success":
-			return s.closeHeld(ctx, tx, row, task.ID)
+			return s.closeHeld(ctx, tx, row, task)
 		case "unknown":
 			if err := s.raiseFence(ctx, tx, row, task.ID); err != nil {
 				return err
 			}
-			_, err = tx.ExecContext(ctx, `
-				UPDATE rtc_task SET status = 'pending', last_error = 'unknown', lease_owner = '', lease_until = NULL,
-				run_at = DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 SECOND) WHERE task_id = ?`, task.ID)
-			if err != nil {
-				return s.unavailable("task", err)
-			}
-			return nil
+			return s.holdUnknown(ctx, tx, task)
 		case "fail":
 			return errors.New("fail")
 		default:
@@ -768,9 +818,12 @@ func (s *Store) execStop(ctx context.Context, task rtcTask) error {
 func (s *Store) execTimeout(ctx context.Context, task rtcTask) error {
 	_, grace, _, _ := s.delays()
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.guardTask(ctx, tx, task); err != nil {
+			return err
+		}
 		call, err := peekCall(ctx, tx, task.BusinessID)
 		if errors.Is(err, ErrNotFound) {
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "stale")
+			return s.finishTaskTx(ctx, tx, task, "done", "stale")
 		}
 		if err != nil {
 			return err
@@ -782,12 +835,24 @@ func (s *Store) execTimeout(ctx context.Context, task rtcTask) error {
 		if err != nil {
 			return err
 		}
-		if call.Generation != task.Generation || call.Status != "RINGING" {
-			return s.finishTaskTx(ctx, tx, task.ID, "done", "stale")
+		if call.Generation != task.Generation || (call.Status != "RINGING" && call.Status != "ACCEPTED") {
+			return s.finishTaskTx(ctx, tx, task, "done", "stale")
+		}
+		if call.Status == "ACCEPTED" {
+			var updated time.Time
+			if err := tx.QueryRowContext(ctx, `
+				SELECT updated_at FROM rtc_call WHERE tenant_id = ? AND call_id = ?`, call.tenant, call.CallID).Scan(&updated); err != nil {
+				return s.unavailable("call", err)
+			}
+			_, _, ring, _ := s.delays()
+			if updated.Add(ring).After(time.Now().UTC()) {
+				when := updated.Add(ring)
+				return s.settleTask(ctx, tx, task, "pending", "", &when, true)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE rtc_call SET status = 'TIMEOUT' WHERE tenant_id = ? AND call_id = ? AND status = 'RINGING' AND generation = ?`,
-			call.tenant, call.CallID, call.Generation); err != nil {
+			UPDATE rtc_call SET status = 'TIMEOUT' WHERE tenant_id = ? AND call_id = ? AND status = ? AND generation = ?`,
+			call.tenant, call.CallID, call.Status, call.Generation); err != nil {
 			return s.unavailable("call", err)
 		}
 		if _, err := tx.ExecContext(ctx, `
@@ -801,29 +866,64 @@ func (s *Store) execTimeout(ctx context.Context, task rtcTask) error {
 		if err := s.afterOccupancy(ctx, tx, session, grace); err != nil {
 			return err
 		}
-		return s.finishTaskTx(ctx, tx, task.ID, "done", "")
+		return s.finishTaskTx(ctx, tx, task, "done", "")
 	})
 }
 
 func (s *Store) execRelease(ctx context.Context, task rtcTask) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.guardTask(ctx, tx, task); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM rtc_call_hold WHERE call_id = ?`, task.BusinessID); err != nil {
 			return s.unavailable("call", err)
 		}
-		return s.finishTaskTx(ctx, tx, task.ID, "done", "")
+		return s.finishTaskTx(ctx, tx, task, "done", "")
 	})
 }
 
 func (s *Store) execExpire(ctx context.Context, task rtcTask) error {
-	_, grace, _, _ := s.delays()
+	_, grace, ring, _ := s.delays()
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		if err := s.guardTask(ctx, tx, task); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE rtc_viewer SET status = 'DISCONNECTED'
-			WHERE status = 'JOINING' AND heartbeat_at <= DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)`, grace.Microseconds()); err != nil {
+			WHERE status IN ('JOINING', 'ACTIVE')
+			  AND heartbeat_at <= DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)`, grace.Microseconds()); err != nil {
 			return s.unavailable("viewer", err)
 		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE rtc_call SET status = 'TIMEOUT'
+			WHERE status = 'ACCEPTED'
+			  AND updated_at <= DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)`, ring.Microseconds()); err != nil {
+			return s.unavailable("call", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE rtc_call AS c
+			JOIN rtc_session AS s ON s.tenant_id = c.tenant_id AND s.session_id = c.session_id
+			SET c.status = 'ENDED'
+			WHERE c.status = 'CONNECTED' AND s.media_ready = 0
+			  AND c.updated_at <= DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)`, grace.Microseconds()); err != nil {
+			return s.unavailable("call", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE rtc_call AS c
+			JOIN rtc_session AS sess ON sess.tenant_id = c.tenant_id AND sess.session_id = c.session_id
+			SET c.status = 'ENDED'
+			WHERE c.status = 'CONNECTED' AND sess.status IN ('FAILED', 'CLOSED')`); err != nil {
+			return s.unavailable("call", err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			DELETE h FROM rtc_call_hold AS h
+			INNER JOIN rtc_call AS c ON c.tenant_id = h.tenant_id AND c.call_id = h.call_id
+			WHERE c.status IN ('REJECTED', 'TIMEOUT', 'ENDED', 'FAILED')`); err != nil {
+			return s.unavailable("call", err)
+		}
 		rows, err := tx.QueryContext(ctx, `
-			SELECT tenant_id, session_id, device_id FROM rtc_session WHERE status = 'ACTIVE'`)
+			SELECT tenant_id, session_id, device_id FROM rtc_session
+			WHERE status IN ('CREATED', 'WAITING_DEVICE', 'STREAM_STARTING', 'ACTIVE', 'STOP_PENDING')`)
 		if err != nil {
 			return s.unavailable("session", err)
 		}
@@ -840,27 +940,76 @@ func (s *Store) execExpire(ctx context.Context, task rtcTask) error {
 		if err := rows.Close(); err != nil {
 			return s.unavailable("session", err)
 		}
+		sort.Slice(refs, func(i, j int) bool {
+			if refs[i].tenant != refs[j].tenant {
+				return refs[i].tenant < refs[j].tenant
+			}
+			return refs[i].device < refs[j].device
+		})
 		for _, item := range refs {
 			if err := lockDevice(tx, ctx, item.tenant, item.device); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					continue
+				}
 				return err
 			}
 			session, err := loadSession(ctx, tx, item.tenant, item.session)
-			if err != nil || session.Status != "ACTIVE" {
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					continue
+				}
+				return err
+			}
+			if session.Status == "CREATED" || session.Status == "WAITING_DEVICE" || session.Status == "STREAM_STARTING" {
+				var updated time.Time
+				if err := tx.QueryRowContext(ctx, `
+					SELECT updated_at FROM rtc_session WHERE tenant_id = ? AND session_id = ?`, session.tenant, session.SessionID).Scan(&updated); err != nil {
+					return s.unavailable("session", err)
+				}
+				if !updated.Add(ring).After(time.Now().UTC()) {
+					if err := s.failStartup(ctx, tx, session); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if session.Status != "ACTIVE" && session.Status != "STOP_PENDING" {
 				continue
 			}
 			if err := s.afterOccupancy(ctx, tx, session, grace); err != nil {
 				return err
 			}
 		}
-		_, err = tx.ExecContext(ctx, `
-			UPDATE rtc_task SET status = 'pending', attempts = 0, lease_owner = '', lease_until = NULL,
-			run_at = DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 SECOND) WHERE task_id = ?`, task.ID)
-		if err != nil {
-			return s.unavailable("task", err)
-		}
-		return nil
+		when := time.Now().UTC().Add(time.Second)
+		return s.settleTask(ctx, tx, task, "pending", "", &when, true)
 	})
 	return err
+}
+
+func (s *Store) failStartup(ctx context.Context, tx *sql.Tx, row sessionRow) error {
+	if row.Status != "CREATED" && row.Status != "WAITING_DEVICE" && row.Status != "STREAM_STARTING" {
+		return nil
+	}
+	if _, err := s.saveSession(ctx, tx, row, "fail"); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE rtc_call SET status = 'FAILED'
+		WHERE tenant_id = ? AND session_id = ? AND status IN ('CREATED', 'RINGING', 'ACCEPTED', 'CONNECTED')`,
+		row.tenant, row.SessionID); err != nil {
+		return s.unavailable("call", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE h FROM rtc_call_hold AS h
+		INNER JOIN rtc_call AS c ON c.tenant_id = h.tenant_id AND c.call_id = h.call_id
+		WHERE c.tenant_id = ? AND c.session_id = ? AND c.status = 'FAILED'`,
+		row.tenant, row.SessionID); err != nil {
+		return s.unavailable("call", err)
+	}
+	if err := s.releaseHold(ctx, tx, row); err != nil {
+		return err
+	}
+	return s.syncPresence(ctx, tx, row.tenant, row.DeviceID)
 }
 
 func (s *Store) ensureSession(ctx context.Context, tx *sql.Tx, tenant, deviceID, channel, stream, resolution string) (sessionRow, error) {
@@ -953,7 +1102,7 @@ func (s *Store) afterOccupancy(ctx context.Context, tx *sql.Tx, row sessionRow, 
 	return s.enqueue(ctx, tx, row.tenant, "stop_stream", row.SessionID, row.Generation, time.Now().UTC().Add(stop))
 }
 
-func (s *Store) closeHeld(ctx context.Context, tx *sql.Tx, row sessionRow, taskID string) error {
+func (s *Store) closeHeld(ctx context.Context, tx *sql.Tx, row sessionRow, task rtcTask) error {
 	if row.Status == "STOPPING" {
 		next, err := s.saveSession(ctx, tx, row, "closed")
 		if err != nil {
@@ -975,7 +1124,7 @@ func (s *Store) closeHeld(ctx context.Context, tx *sql.Tx, row sessionRow, taskI
 	if err := s.syncPresence(ctx, tx, row.tenant, row.DeviceID); err != nil {
 		return err
 	}
-	return s.finishTaskTx(ctx, tx, taskID, "done", "")
+	return s.finishTaskTx(ctx, tx, task, "done", "")
 }
 
 func (s *Store) saveSession(ctx context.Context, tx *sql.Tx, row sessionRow, event string) (sessionRow, error) {
@@ -1013,8 +1162,9 @@ func (s *Store) occupants(ctx context.Context, tx *sql.Tx, tenant, sessionID str
 	var viewers int
 	cutoffMicros := grace.Microseconds()
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM rtc_viewer WHERE tenant_id = ? AND session_id = ? AND
-		(status = 'ACTIVE' OR (status = 'JOINING' AND heartbeat_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)))`,
+		SELECT COUNT(*) FROM rtc_viewer WHERE tenant_id = ? AND session_id = ?
+		AND status IN ('ACTIVE', 'JOINING')
+		AND heartbeat_at > DATE_SUB(UTC_TIMESTAMP(3), INTERVAL ? MICROSECOND)`,
 		tenant, sessionID, cutoffMicros).Scan(&viewers); err != nil {
 		return 0, s.unavailable("viewer", err)
 	}
@@ -1028,7 +1178,7 @@ func (s *Store) occupants(ctx context.Context, tx *sql.Tx, tenant, sessionID str
 }
 
 func (s *Store) moveCall(ctx context.Context, user User, callID, event string, end bool) error {
-	_, grace, _, _ := s.delays()
+	_, grace, ring, _ := s.delays()
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		call, err := peekCall(ctx, tx, callID)
 		if err != nil {
@@ -1047,27 +1197,39 @@ func (s *Store) moveCall(ctx context.Context, user User, callID, event string, e
 		if err := permit(ctx, tx, user, call.DeviceID, "call"); err != nil {
 			return err
 		}
+		if !rtc.CanOperateCall(user.ID, call.CallerID, call.CalleeID, call.AnsweredBy, call.Status, event) {
+			return ErrForbidden
+		}
 		action := event
 		if end && call.Status == "RINGING" && user.ID == call.CallerID {
 			action = "cancel"
 		}
-		if (action == "accept" || action == "reject") && user.ID == call.CallerID {
-			return ErrForbidden
+		if end && call.Status == "RINGING" && user.ID == call.CalleeID {
+			action = "reject"
 		}
 		next, err := rtc.NextCall(call.Status, action)
-		if err != nil && end && call.Status == "RINGING" {
-			next, err = rtc.NextCall(call.Status, "reject")
-			if user.ID == call.CallerID {
-				return ErrForbidden
-			}
-		}
 		if err != nil {
 			return ErrConflict
 		}
-		if _, err := tx.ExecContext(ctx, `
+		if action == "accept" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE rtc_call SET status = ?, answered_by = ?
+				WHERE tenant_id = ? AND call_id = ? AND status = ? AND generation = ?`,
+				next, user.ID, user.TenantID, callID, call.Status, call.Generation); err != nil {
+				return s.unavailable("call", err)
+			}
+		} else if _, err := tx.ExecContext(ctx, `
 			UPDATE rtc_call SET status = ? WHERE tenant_id = ? AND call_id = ? AND status = ? AND generation = ?`,
 			next, user.TenantID, callID, call.Status, call.Generation); err != nil {
 			return s.unavailable("call", err)
+		}
+		if next == "ACCEPTED" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE rtc_task SET run_at = ?
+				WHERE tenant_id = ? AND task_type = 'call_timeout' AND business_id = ? AND generation = ? AND status = 'pending'`,
+				time.Now().UTC().Add(ring), user.TenantID, callID, call.Generation); err != nil {
+				return s.unavailable("task", err)
+			}
 		}
 		if rtc.TerminalCall(next) {
 			if _, err := tx.ExecContext(ctx, `
@@ -1086,7 +1248,10 @@ func (s *Store) moveCall(ctx context.Context, user User, callID, event string, e
 	})
 }
 
-func (s *Store) connectCall(ctx context.Context, tx *sql.Tx, tenant, callID string, generation int64) error {
+func (s *Store) connectCall(ctx context.Context, tx *sql.Tx, tenant, sessionID, callID string, generation int64) error {
+	if callID == "" {
+		return ErrInvalid
+	}
 	call, err := loadCall(ctx, tx, tenant, callID)
 	if errors.Is(err, ErrNotFound) {
 		return nil
@@ -1094,7 +1259,7 @@ func (s *Store) connectCall(ctx context.Context, tx *sql.Tx, tenant, callID stri
 	if err != nil {
 		return err
 	}
-	if !rtc.AcceptEvent(call.Generation, generation) {
+	if !rtc.SameRound(call.SessionID, call.Generation, sessionID, generation) {
 		return nil
 	}
 	next, err := rtc.NextCall(call.Status, "connect")
@@ -1172,6 +1337,83 @@ func (s *Store) enqueue(ctx context.Context, tx *sql.Tx, tenant, kind, business 
 	if err != nil {
 		return s.unavailable("task", err)
 	}
+	return nil
+}
+
+func (s *Store) holdUnknown(ctx context.Context, tx *sql.Tx, task rtcTask) error {
+	if task.Attempts >= rtcAttempts {
+		return s.finishTaskTx(ctx, tx, task, "needs_attention", "unknown")
+	}
+	when := time.Now().UTC().Add(time.Second)
+	return s.settleTask(ctx, tx, task, "pending", "unknown", &when, false)
+}
+
+func (s *Store) streamStatus(ctx context.Context, tx *sql.Tx, tenant, deviceID string) (string, error) {
+	var raw sql.NullString
+	err := tx.QueryRowContext(ctx, `
+		SELECT result FROM rtc_control_plan WHERE tenant_id = ? AND device_id = ? AND op = 'status'`, tenant, deviceID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (!raw.Valid || raw.String == "")) {
+		return "unknown", nil
+	}
+	if err != nil {
+		return "", s.unavailable("plan", err)
+	}
+	switch raw.String {
+	case "success", "fail", "unknown", "timeout":
+		return raw.String, nil
+	default:
+		return "unknown", nil
+	}
+}
+
+// openMedia 创建或复用已经记下的房间。数据库没提交成功时删掉这次新建的房间。
+func (s *Store) openMedia(ctx context.Context, tx *sql.Tx, row sessionRow, task rtcTask) error {
+	var provider media.TestProvider
+	var room media.Room
+	existed := false
+	err := tx.QueryRowContext(ctx, `
+		SELECT provider_resource_id FROM rtc_media_resource
+		WHERE tenant_id = ? AND session_id = ? AND resource_type = 'room'`, row.tenant, row.SessionID).Scan(&room.ID)
+	switch {
+	case err == nil && room.ID != "":
+		existed = true
+		room.SessionID = row.SessionID
+	case errors.Is(err, sql.ErrNoRows):
+		room, err = provider.CreateRoom(ctx, media.RoomRequest{SessionID: row.SessionID, Generation: row.Generation})
+		if err != nil {
+			return err
+		}
+	default:
+		if err != nil {
+			return s.unavailable("media", err)
+		}
+	}
+	kept := existed
+	defer func() {
+		if !kept {
+			_ = provider.DeleteRoom(ctx, room.ID)
+		}
+	}()
+	if err := s.mapRoom(ctx, tx, row, room.ID); err != nil {
+		return err
+	}
+	row.DeviceReady = true
+	if row.Status == "WAITING_DEVICE" {
+		row, err = s.saveSession(ctx, tx, row, "start")
+		if err != nil {
+			return err
+		}
+	}
+	if _, err = s.saveSession(ctx, tx, row, "mark"); err != nil {
+		return err
+	}
+	if err := s.syncPresence(ctx, tx, row.tenant, row.DeviceID); err != nil {
+		return err
+	}
+	if err := s.finishTaskTx(ctx, tx, task, "done", ""); err != nil {
+		return err
+	}
+	kept = true
 	return nil
 }
 
@@ -1345,15 +1587,49 @@ func (s *Store) ensureExpire(ctx context.Context, tenantHint string) error {
 	return nil
 }
 
-func (s *Store) finishTask(ctx context.Context, taskID, status, reason string) error {
+func (s *Store) finishTask(ctx context.Context, task rtcTask, status, reason string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		return s.finishTaskTx(ctx, tx, taskID, status, reason)
+		return s.finishTaskTx(ctx, tx, task, status, reason)
 	})
 }
 
-func (s *Store) finishTaskTx(ctx context.Context, tx *sql.Tx, taskID, status, reason string) error {
-	_, err := tx.ExecContext(ctx, `
-		UPDATE rtc_task SET status = ?, last_error = ?, lease_owner = '', lease_until = NULL WHERE task_id = ?`, status, reason, taskID)
+func (s *Store) finishTaskTx(ctx context.Context, tx *sql.Tx, task rtcTask, status, reason string) error {
+	return s.settleTask(ctx, tx, task, status, reason, nil, false)
+}
+
+func (s *Store) settleTask(ctx context.Context, tx *sql.Tx, task rtcTask, status, reason string, runAt *time.Time, reset bool) error {
+	resetBit := 0
+	if reset {
+		resetBit = 1
+	}
+	var run any
+	if runAt != nil {
+		run = runAt.UTC()
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE rtc_task
+		SET status = ?, last_error = ?, lease_owner = '', lease_until = NULL,
+		    run_at = COALESCE(?, run_at), attempts = IF(? = 1, 0, attempts)
+		WHERE task_id = ? AND status = 'leased' AND lease_owner = ? AND lease_token = ?`,
+		status, reason, run, resetBit, task.ID, task.Owner, task.Token)
+	if err != nil {
+		return s.unavailable("task", err)
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return errLeaseLost
+	}
+	return nil
+}
+
+func (s *Store) guardTask(ctx context.Context, tx *sql.Tx, task rtcTask) error {
+	var status, owner string
+	var token int64
+	err := tx.QueryRowContext(ctx, `
+		SELECT status, lease_owner, lease_token FROM rtc_task WHERE task_id = ?`, task.ID).Scan(&status, &owner, &token)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !ownsLease(status, owner, token, task)) {
+		return errLeaseLost
+	}
 	if err != nil {
 		return s.unavailable("task", err)
 	}
@@ -1361,6 +1637,9 @@ func (s *Store) finishTaskTx(ctx context.Context, tx *sql.Tx, taskID, status, re
 }
 
 func (s *Store) retryTask(ctx context.Context, task rtcTask, cause error) error {
+	if errors.Is(cause, errLeaseLost) {
+		return nil
+	}
 	status := "pending"
 	if task.Attempts >= rtcAttempts {
 		status = "needs_attention"
@@ -1371,11 +1650,17 @@ func (s *Store) retryTask(ctx context.Context, task rtcTask, cause error) error 
 	} else if cause != nil && cause.Error() == "fail" {
 		reason = "fail"
 	}
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE rtc_task SET status = ?, last_error = ?, lease_owner = '', lease_until = NULL,
-		run_at = DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 SECOND) WHERE task_id = ? AND status = 'leased'`, status, reason, task.ID)
+	when := time.Now().UTC().Add(time.Second)
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE rtc_task SET status = ?, last_error = ?, lease_owner = '', lease_until = NULL, run_at = ?
+		WHERE task_id = ? AND status = 'leased' AND lease_owner = ? AND lease_token = ?`,
+		status, reason, when, task.ID, task.Owner, task.Token)
 	if err != nil {
 		return s.unavailable("task", err)
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return nil
 	}
 	return nil
 }
@@ -1479,26 +1764,26 @@ func (s *Store) lockViewer(ctx context.Context, tx *sql.Tx, tenant, viewerID str
 
 func loadCall(ctx context.Context, tx *sql.Tx, tenant, callID string) (CallView, error) {
 	view, err := scanCall(tx.QueryRowContext(ctx, `
-		SELECT tenant_id, call_id, device_id, session_id, caller_user_id, status, generation
+		SELECT tenant_id, call_id, device_id, session_id, caller_user_id, COALESCE(callee_user_id, 0), COALESCE(answered_by, 0), status, generation
 		FROM rtc_call WHERE tenant_id = ? AND call_id = ? FOR UPDATE`, tenant, callID))
 	return view, err
 }
 
 func peekCall(ctx context.Context, tx *sql.Tx, callID string) (CallView, error) {
 	return scanCall(tx.QueryRowContext(ctx, `
-		SELECT tenant_id, call_id, device_id, session_id, caller_user_id, status, generation
+		SELECT tenant_id, call_id, device_id, session_id, caller_user_id, COALESCE(callee_user_id, 0), COALESCE(answered_by, 0), status, generation
 		FROM rtc_call WHERE call_id = ?`, callID))
 }
 
 func loadCallAny(ctx context.Context, tx *sql.Tx, callID string) (CallView, error) {
 	return scanCall(tx.QueryRowContext(ctx, `
-		SELECT tenant_id, call_id, device_id, session_id, caller_user_id, status, generation
+		SELECT tenant_id, call_id, device_id, session_id, caller_user_id, COALESCE(callee_user_id, 0), COALESCE(answered_by, 0), status, generation
 		FROM rtc_call WHERE call_id = ? FOR UPDATE`, callID))
 }
 
 func scanCall(row *sql.Row) (CallView, error) {
 	var view CallView
-	err := row.Scan(&view.tenant, &view.CallID, &view.DeviceID, &view.SessionID, &view.CallerID, &view.Status, &view.Generation)
+	err := row.Scan(&view.tenant, &view.CallID, &view.DeviceID, &view.SessionID, &view.CallerID, &view.CalleeID, &view.AnsweredBy, &view.Status, &view.Generation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CallView{}, ErrNotFound
 	}
@@ -1508,20 +1793,46 @@ func scanCall(row *sql.Row) (CallView, error) {
 	return view, nil
 }
 
+// lockDevice 锁住设备行，给退出、挂断和回收用。设备已禁用或吊销时仍然可以清理旧业务。
 func lockDevice(tx *sql.Tx, ctx context.Context, tenant, deviceID string) error {
-	var enabled, revoked int
+	var one int
 	err := tx.QueryRowContext(ctx, `
-		SELECT enabled, credential_revoked FROM device WHERE tenant_id = ? AND device_id = ? FOR UPDATE`, tenant, deviceID).Scan(&enabled, &revoked)
+		SELECT 1 FROM device WHERE tenant_id = ? AND device_id = ? FOR UPDATE`, tenant, deviceID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return ErrUnavailable
 	}
-	if enabled != 1 || revoked != 0 {
+	return nil
+}
+
+// requireOpenDevice 锁住设备，并且只放行仍可接入的设备。新的票据、观看和通话走这里。
+func requireOpenDevice(tx *sql.Tx, ctx context.Context, tenant, deviceID string) error {
+	if err := lockDevice(tx, ctx, tenant, deviceID); err != nil {
+		return err
+	}
+	open, err := deviceIsOpen(tx, ctx, tenant, deviceID)
+	if err != nil {
+		return err
+	}
+	if !open {
 		return ErrConflict
 	}
 	return nil
+}
+
+func deviceIsOpen(tx *sql.Tx, ctx context.Context, tenant, deviceID string) (bool, error) {
+	var enabled, revoked int
+	err := tx.QueryRowContext(ctx, `
+		SELECT enabled, credential_revoked FROM device WHERE tenant_id = ? AND device_id = ?`, tenant, deviceID).Scan(&enabled, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, ErrUnavailable
+	}
+	return enabled == 1 && revoked == 0, nil
 }
 
 func permit(ctx context.Context, tx *sql.Tx, user User, deviceID, perm string) error {

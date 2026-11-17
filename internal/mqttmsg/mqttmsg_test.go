@@ -83,6 +83,18 @@ func TestReplyDoesNotReopenTerminalState(t *testing.T) {
 	if next, ok := ReplyState("sending", 1002); !ok || next != "failed" {
 		t.Fatalf("failed = %s %v", next, ok)
 	}
+	if next, ok := ReplyState("uncertain", 0); !ok || next != "accepted" {
+		t.Fatalf("uncertain accepted = %s %v", next, ok)
+	}
+	if next, ok := ReplyState("uncertain", 1002); !ok || next != "failed" {
+		t.Fatalf("uncertain failed = %s %v", next, ok)
+	}
+	if _, ok := ReplyState("needs_attention", 0); ok {
+		t.Fatal("attention reopened")
+	}
+	if _, ok := ReplyState("cancelled", 0); ok {
+		t.Fatal("cancelled reopened")
+	}
 }
 
 func TestAccessMatrix(t *testing.T) {

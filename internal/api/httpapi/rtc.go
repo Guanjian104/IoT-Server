@@ -22,8 +22,6 @@ func (s *Server) registerRTC(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/calls/{callID}/reject", s.rejectCall)
 	mux.HandleFunc("POST /api/v1/calls/{callID}/end", s.endCall)
 	mux.HandleFunc("GET /api/v1/calls/{callID}", s.getCall)
-	mux.HandleFunc("PUT /internal/rtc/plan", s.putPlan)
-	mux.HandleFunc("POST /internal/media/events", s.mediaEvent)
 }
 
 func (s *Server) issueTicket(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +126,7 @@ func (s *Server) startCall(w http.ResponseWriter, r *http.Request) {
 	s.withTicketDevice(w, r, func(user store.User, device store.Device) {
 		var body struct {
 			Ticket     string `json:"ticket"`
+			Callee     string `json:"callee"`
 			ChannelID  string `json:"channel_id"`
 			StreamType string `json:"stream_type"`
 			Resolution string `json:"resolution"`
@@ -136,7 +135,7 @@ func (s *Server) startCall(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid")
 			return
 		}
-		result, err := s.store.StartCall(r.Context(), user, device.DeviceID, body.Ticket, body.ChannelID, body.StreamType, body.Resolution)
+		result, err := s.store.StartCall(r.Context(), user, device.DeviceID, body.Ticket, body.Callee, body.ChannelID, body.StreamType, body.Resolution)
 		if !writeRTCError(w, err) {
 			return
 		}
