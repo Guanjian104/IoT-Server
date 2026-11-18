@@ -34,11 +34,21 @@ func Ready(state *health.State) http.HandlerFunc {
 		if !allowRead(w, r) {
 			return
 		}
-		if state != nil && state.Ready() {
-			writeJSON(w, r, http.StatusOK, map[string]string{"status": "ready"})
-			return
+		report := health.Report{}
+		if state != nil {
+			report = state.Report()
 		}
-		writeJSON(w, r, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
+		status := "not_ready"
+		code := http.StatusServiceUnavailable
+		if report.Ready {
+			status = "ready"
+			code = http.StatusOK
+		}
+		writeJSON(w, r, code, map[string]string{
+			"status":            status,
+			"mqtt_subscribed":   strconv.FormatBool(report.MQTTSubscribed),
+			"command_attention": strconv.Itoa(report.CommandAttention),
+		})
 	}
 }
 

@@ -24,3 +24,54 @@ func TestLateDisconnectDoesNotClearNewerSession(t *testing.T) {
 		t.Fatalf("older timestamp applied: %+v", ignored)
 	}
 }
+
+func TestDuplicateSessionDoesNotRewrite(t *testing.T) {
+	current, ok := Apply(Snapshot{}, Event{Kind: Connected, ConnectedAt: 100})
+	if !ok {
+		t.Fatal("first connect was ignored")
+	}
+	again, ok := Apply(current, Event{Kind: Connected, ConnectedAt: 100})
+	if ok || again != current {
+		t.Fatalf("duplicate connect = %+v %v", again, ok)
+	}
+	offline, ok := Apply(current, Event{Kind: Disconnected, ConnectedAt: 100, Disconnected: 150})
+	if !ok || offline.Online || offline.DisconnectedAt != 150 {
+		t.Fatalf("disconnect = %+v %v", offline, ok)
+	}
+	replayed, ok := Apply(offline, Event{Kind: Connected, ConnectedAt: 100})
+	if ok || replayed.Online || replayed != offline {
+		t.Fatalf("replayed connect = %+v %v", replayed, ok)
+	}
+	repeated, ok := Apply(offline, Event{Kind: Disconnected, ConnectedAt: 100, Disconnected: 180})
+	if ok || repeated != offline {
+		t.Fatalf("duplicate disconnect = %+v %v", repeated, ok)
+	}
+}
+
+func TestCalibrateRepairsMissedSession(t *testing.T) {
+	offline := Snapshot{Generation: 100, ConnectedAt: 100, DisconnectedAt: 150}
+	restored, ok := Calibrate(offline, true, 100)
+	if !ok || !restored.Online || restored.Generation != 100 || restored.ConnectedAt != 100 {
+		t.Fatalf("restore = %+v %v", restored, ok)
+	}
+	same, ok := Calibrate(restored, true, 100)
+	if ok || same != restored {
+		t.Fatalf("repeat sighting = %+v %v", same, ok)
+	}
+	replaced, ok := Calibrate(restored, true, 250)
+	if !ok || !replaced.Online || replaced.Generation != 250 || replaced.ConnectedAt != 250 {
+		t.Fatalf("newer sighting = %+v %v", replaced, ok)
+	}
+	missed, ok := Calibrate(replaced, false, 0)
+	if !ok || missed.Online || missed.Generation != 250 {
+		t.Fatalf("missed disconnect = %+v %v", missed, ok)
+	}
+	still, ok := Calibrate(missed, false, 0)
+	if ok || still != missed {
+		t.Fatalf("repeat absence = %+v %v", still, ok)
+	}
+	older, ok := Calibrate(missed, true, 80)
+	if !ok || !older.Online || older.Generation != 250 {
+		t.Fatalf("older sighting = %+v %v", older, ok)
+	}
+}

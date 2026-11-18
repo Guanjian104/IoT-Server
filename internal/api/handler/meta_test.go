@@ -11,7 +11,7 @@ import (
 
 func TestProbesAndVersion(t *testing.T) {
 	state := &health.State{}
-	state.SetReady(true)
+	state.Publish(health.Report{Ready: true, MQTTSubscribed: true, CommandAttention: 2})
 	meta := Meta{InstanceID: "box-1", ConfigVersion: "cfg-1", BuildVersion: "b02", Revision: "local"}
 
 	live := getJSON(t, http.HandlerFunc(Live), "/health/live")
@@ -19,7 +19,7 @@ func TestProbesAndVersion(t *testing.T) {
 		t.Fatalf("live = %v", live)
 	}
 	ready := getJSON(t, Ready(state), "/health/ready")
-	if ready["status"] != "ready" {
+	if ready["status"] != "ready" || ready["mqtt_subscribed"] != "true" || ready["command_attention"] != "2" {
 		t.Fatalf("ready = %v", ready)
 	}
 	state.SetReady(false)

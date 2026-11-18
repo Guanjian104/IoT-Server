@@ -16,6 +16,9 @@ type Metrics struct {
 	authDeny    atomic.Int64
 	inbound     atomic.Int64
 	cmdTimeout  atomic.Int64
+	kickOK      atomic.Int64
+	kickFailed  atomic.Int64
+	attention   atomic.Int64
 	mysqlUp     atomic.Int64
 	redisUp     atomic.Int64
 	mqttUp      atomic.Int64
@@ -55,6 +58,26 @@ func (m *Metrics) NoteCommandTimeout(n int) {
 	}
 }
 
+// NoteKick 记录一次踢线的最终结果。
+func (m *Metrics) NoteKick(ok bool) {
+	if m == nil {
+		return
+	}
+	if ok {
+		m.kickOK.Add(1)
+		return
+	}
+	m.kickFailed.Add(1)
+}
+
+// SetCommandAttention 设置仍需人工处理的命令数量。
+func (m *Metrics) SetCommandAttention(n int) {
+	if m == nil || n < 0 {
+		return
+	}
+	m.attention.Store(int64(n))
+}
+
 // SetDependency 设置某个依赖当前是否可用。name 只能是 mysql、redis、mqtt。
 func (m *Metrics) SetDependency(name string, up bool) {
 	value := int64(0)
@@ -77,6 +100,9 @@ func (m *Metrics) Text() string {
 	b = appendCounter(b, "iot_mqtt_auth_deny_total", "MQTT authentication denials.", m.authDeny.Load())
 	b = appendCounter(b, "iot_mqtt_inbound_total", "Inbound device messages accepted or rejected after persistence.", m.inbound.Load())
 	b = appendCounter(b, "iot_command_timeout_total", "Commands moved to timeout.", m.cmdTimeout.Load())
+	b = appendLabeledCounter(b, "iot_device_kick_total", "Device kick results.", "result", "ok", m.kickOK.Load())
+	b = appendLabeledCounter(b, "iot_device_kick_total", "", "result", "failed", m.kickFailed.Load())
+	b = appendPlainGauge(b, "iot_command_attention", "Commands waiting for a person.", m.attention.Load())
 	b = appendGauge(b, "iot_dependency_up", "Dependency health.", "dependency", "mysql", m.mysqlUp.Load())
 	b = appendGauge(b, "iot_dependency_up", "", "dependency", "redis", m.redisUp.Load())
 	b = appendGauge(b, "iot_dependency_up", "", "dependency", "mqtt", m.mqttUp.Load())
@@ -91,6 +117,18 @@ func appendCounter(dst []byte, name, help string, value int64) []byte {
 		dst = fmt.Appendf(dst, "# HELP %s %s\n", name, help)
 	}
 	return fmt.Appendf(dst, "%s %d\n", name, value)
+}
+
+func appendLabeledCounter(dst []byte, name, help, label, labelValue string, value int64) []byte {
+	if help != "" {
+		dst = fmt.Appendf(dst, "# TYPE %s counter\n# HELP %s %s\n", name, name, help)
+	}
+	return fmt.Appendf(dst, "%s{%s=%s} %d\n", name, label, strconv.Quote(labelValue), value)
+}
+
+func appendPlainGauge(dst []byte, name, help string, value int64) []byte {
+	dst = fmt.Appendf(dst, "# TYPE %s gauge\n# HELP %s %s\n%s %d\n", name, name, help, name, value)
+	return dst
 }
 
 func appendGauge(dst []byte, name, help, label, labelValue string, value int64) []byte {

@@ -19,11 +19,17 @@ func TestAuthSpikeAndTextHasNoDeviceLabel(t *testing.T) {
 		t.Fatal("spike edge")
 	}
 	m.SetDependency("mysql", true)
+	m.NoteKick(true)
+	m.NoteKick(false)
+	m.SetCommandAttention(3)
 	text := m.Text()
 	if strings.Contains(text, "device_id") || !strings.Contains(text, "iot_mqtt_auth_deny_total 6") {
 		t.Fatal(text)
 	}
 	if !strings.Contains(text, `dependency="mysql"`) || strings.Contains(text, "94a990cb56a8") {
+		t.Fatal(text)
+	}
+	if !strings.Contains(text, `iot_device_kick_total{result="ok"} 1`) || !strings.Contains(text, `iot_device_kick_total{result="failed"} 1`) || !strings.Contains(text, "iot_command_attention 3") {
 		t.Fatal(text)
 	}
 }

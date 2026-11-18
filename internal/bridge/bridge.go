@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -18,16 +19,25 @@ import (
 
 // Bridge 是一个服务账号连接。业务结果先写入 MySQL，再确认 MQTT。
 type Bridge struct {
-	client  mqtt.Client
-	store   *store.Store
-	log     logger.Logger
-	metrics *metrics.Metrics
-	tenant  string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	once    sync.Once
-	lane    *lane
+	client     mqtt.Client
+	store      *store.Store
+	log        logger.Logger
+	metrics    *metrics.Metrics
+	tenant     string
+	ctx        context.Context
+	cancel     context.CancelFunc
+	once       sync.Once
+	lane       *lane
+	sessions   sessionSource
+	subscribed atomic.Bool
 }
+
+// sessionSource 列出 Broker 上仍连接的客户端。时间为毫秒；第二个结果表示列表已经扫完。
+type sessionSource interface {
+	ConnectedDevices(ctx context.Context) (map[string]int64, bool, error)
+}
+
+const sessionCalibrateEvery = 5 * time.Second
 
 // New 创建连接，但要等数据库迁移完成后再 Ensure。
 func New(parent context.Context, cfg config.Config, st *store.Store, log logger.Logger, m *metrics.Metrics) *Bridge {
@@ -38,12 +48,20 @@ func New(parent context.Context, cfg config.Config, st *store.Store, log logger.
 	opts.SetDefaultPublishHandler(b.onMessage)
 	opts.SetOnConnectHandler(b.onConnect)
 	opts.SetConnectionLostHandler(func(_ mqtt.Client, _ error) {
+		b.subscribed.Store(false)
 		if b.log != nil {
 			b.log.Warn("mqtt connection lost", "instance_id", cfg.InstanceID)
 		}
 	})
 	b.client = mqtt.NewClient(opts)
 	return b
+}
+
+// UseSessions 接入 Broker 会话列表。未调用时不做在线校正。需要在 Ensure 之前调用。
+func (b *Bridge) UseSessions(src sessionSource) {
+	if b != nil {
+		b.sessions = src
+	}
 }
 
 // serviceOptions 使用持久会话。未确认的 QoS 1 报文在断线和进程重启后由 Broker 重投。
@@ -81,6 +99,7 @@ func (b *Bridge) Ensure() {
 			}
 		})
 		go b.reconcilePoison()
+		go b.calibratePresence()
 		go b.outbox()
 		token := b.client.Connect()
 		go func() {
@@ -92,6 +111,16 @@ func (b *Bridge) Ensure() {
 // Connected 报告当前这条服务连接是否可用。
 func (b *Bridge) Connected() bool {
 	return b != nil && b.client != nil && b.client.IsConnected()
+}
+
+// Subscribed 报告服务连接是否已经订完业务过滤器和会话事件。
+func (b *Bridge) Subscribed() bool {
+	return b != nil && b.subscribed.Load()
+}
+
+// Ready 报告连接已经建立并且订阅已经完成。
+func (b *Bridge) Ready() bool {
+	return b.Connected() && b.Subscribed()
 }
 
 // Close 停止发送循环并断开连接。
@@ -106,6 +135,7 @@ func (b *Bridge) Close() {
 }
 
 func (b *Bridge) onConnect(client mqtt.Client) {
+	b.subscribed.Store(false)
 	filters := map[string]byte{}
 	for _, filter := range mqttmsg.ServiceFilters() {
 		filters[filter] = 1
@@ -113,6 +143,7 @@ func (b *Bridge) onConnect(client mqtt.Client) {
 	token := client.SubscribeMultiple(filters, nil)
 	waited := token.WaitTimeout(5 * time.Second)
 	if !waited || token.Error() != nil {
+		b.subscribed.Store(false)
 		if b.log != nil {
 			reason := "timeout"
 			if token.Error() != nil {
@@ -123,6 +154,7 @@ func (b *Bridge) onConnect(client mqtt.Client) {
 		go client.Disconnect(0)
 		return
 	}
+	b.subscribed.Store(true)
 	if b.log != nil {
 		b.log.Info("mqtt subscribed")
 	}
@@ -192,6 +224,34 @@ func (b *Bridge) reconcilePoison() {
 		case <-ticker.C:
 			b.retryPoison()
 		}
+	}
+}
+
+func (b *Bridge) calibratePresence() {
+	if b.sessions == nil || b.store == nil {
+		return
+	}
+	ticker := time.NewTicker(sessionCalibrateEvery)
+	defer ticker.Stop()
+	for {
+		b.calibrateOnce()
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (b *Bridge) calibrateOnce() {
+	ctx, cancel := context.WithTimeout(b.ctx, 4*time.Second)
+	defer cancel()
+	online, complete, err := b.sessions.ConnectedDevices(ctx)
+	if err != nil || ctx.Err() != nil {
+		return
+	}
+	if err := b.store.CalibratePresence(ctx, b.tenant, online, complete); err != nil && b.ctx.Err() == nil && b.log != nil {
+		b.log.Error("presence calibration failed")
 	}
 }
 
@@ -411,6 +471,7 @@ func (b *Bridge) publishOne(item store.Outbound) {
 		_ = b.store.ConcludeSending(ctx, item.ID, "timeout")
 		return
 	}
+	// QoS 1 只保证至少送达一次，同一份载荷可能再来。设备按 msgId 只执行一次。
 	token := b.client.Publish(mqttmsg.DeviceTopic(item.DeviceID, "set"), 1, false, item.Payload)
 	uncertain := !token.WaitTimeout(wait)
 	if uncertain || token.Error() != nil {

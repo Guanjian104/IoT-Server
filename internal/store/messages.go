@@ -39,10 +39,13 @@ func (s *Store) IngestReport(ctx context.Context, tenant string, report mqttmsg.
 		if err != nil {
 			return false, s.unavailable("ingest_report", err)
 		}
+		// 更早的字段时间不改当前值。相同时间仍接受后到的报文，历史照常保留。
 		if _, err := tx.ExecContext(ctx, `
 		INSERT INTO device_property_current (tenant_id, device_id, identifier, value_json, reported_at_ms)
 		VALUES (?, ?, ?, ?, ?) AS new_row
-		ON DUPLICATE KEY UPDATE value_json = new_row.value_json, reported_at_ms = new_row.reported_at_ms`,
+		ON DUPLICATE KEY UPDATE
+		  value_json = IF(new_row.reported_at_ms >= device_property_current.reported_at_ms, new_row.value_json, device_property_current.value_json),
+		  reported_at_ms = IF(new_row.reported_at_ms >= device_property_current.reported_at_ms, new_row.reported_at_ms, device_property_current.reported_at_ms)`,
 			tenant, report.DeviceID, field.Identifier, raw, field.Time); err != nil {
 			return false, s.unavailable("ingest_report", err)
 		}
@@ -178,17 +181,112 @@ func (s *Store) ApplySession(ctx context.Context, tenant, deviceID string, event
 	}
 	current.Online = online == 1
 	next, changed := presence.Apply(current, event)
-	if !changed && online != 0 {
+	if !changed {
 		return tx.Commit()
 	}
-	if !changed && online == 0 && current.Generation == 0 && !next.Online {
+	if err := upsertPresence(ctx, tx, tenant, deviceID, next, rtc, track, reported); err != nil {
+		return s.unavailable("presence", err)
+	}
+	return tx.Commit()
+}
+
+// CalibratePresence 按 Broker 上仍连着的设备客户端校正 mqtt_online。
+// 列表不完整时只补在线，避免把没扫到的设备误判成离线。rtc_connected、track_ready 和 reported_status 保持原值。
+func (s *Store) CalibratePresence(ctx context.Context, tenant string, online map[string]int64, complete bool) error {
+	if s == nil {
+		return nil
+	}
+	targets := map[string]presenceTarget{}
+	for id, at := range online {
+		if mqttmsg.ValidDeviceID(id) {
+			targets[id] = presenceTarget{connected: true, at: at}
+		}
+	}
+	if complete {
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT device_id, connected_at_ms FROM device_presence WHERE tenant_id = ? AND mqtt_online = 1`, tenant)
+		if err != nil {
+			return s.unavailable("presence", err)
+		}
+		for rows.Next() {
+			var id string
+			var connectedAt int64
+			if err := rows.Scan(&id, &connectedAt); err != nil {
+				rows.Close()
+				return s.unavailable("presence", err)
+			}
+			if _, seen := targets[id]; !seen {
+				targets[id] = presenceTarget{guard: connectedAt, guarded: true}
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return s.unavailable("presence", err)
+		}
+	}
+	for id, target := range targets {
+		if err := s.calibrateDevice(ctx, tenant, id, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type presenceTarget struct {
+	connected bool
+	at        int64
+	guard     int64
+	guarded   bool
+}
+
+func (s *Store) calibrateDevice(ctx context.Context, tenant, deviceID string, target presenceTarget) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return s.unavailable("presence", err)
+	}
+	defer tx.Rollback()
+	current := presence.Snapshot{}
+	var online, rtc, track int
+	var reported string
+	err = tx.QueryRowContext(ctx, `
+		SELECT mqtt_online, generation_ms, connected_at_ms, disconnected_at_ms, rtc_connected, track_ready, reported_status
+		FROM device_presence WHERE tenant_id = ? AND device_id = ? FOR UPDATE`, tenant, deviceID).Scan(
+		&online, &current.Generation, &current.ConnectedAt, &current.DisconnectedAt, &rtc, &track, &reported)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = nil
+		if !target.connected {
+			return tx.Commit()
+		}
+		var one int
+		err = tx.QueryRowContext(ctx, `SELECT 1 FROM device WHERE tenant_id = ? AND device_id = ?`, tenant, deviceID).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return tx.Commit()
+		}
+	}
+	if err != nil {
+		return s.unavailable("presence", err)
+	}
+	current.Online = online == 1
+	if target.guarded && current.ConnectedAt != target.guard {
 		return tx.Commit()
 	}
+	next, changed := presence.Calibrate(current, target.connected, target.at)
+	if !changed {
+		return tx.Commit()
+	}
+	if err := upsertPresence(ctx, tx, tenant, deviceID, next, rtc, track, reported); err != nil {
+		return s.unavailable("presence", err)
+	}
+	return tx.Commit()
+}
+
+func upsertPresence(ctx context.Context, tx *sql.Tx, tenant, deviceID string, next presence.Snapshot, rtc, track int, reported string) error {
 	onlineValue := 0
 	if next.Online {
 		onlineValue = 1
 	}
-	_, err = tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO device_presence
 		(tenant_id, device_id, mqtt_online, generation_ms, connected_at_ms, disconnected_at_ms, rtc_connected, track_ready, reported_status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) AS new_row
@@ -198,10 +296,7 @@ func (s *Store) ApplySession(ctx context.Context, tenant, deviceID string, event
 		  connected_at_ms = new_row.connected_at_ms,
 		  disconnected_at_ms = new_row.disconnected_at_ms`,
 		tenant, deviceID, onlineValue, next.Generation, next.ConnectedAt, next.DisconnectedAt, rtc, track, reported)
-	if err != nil {
-		return s.unavailable("presence", err)
-	}
-	return tx.Commit()
+	return err
 }
 
 // GetStatus 返回分开的在线观察。没有会话行时 RTC 和轨道仍为 false。

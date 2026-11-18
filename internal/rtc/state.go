@@ -91,6 +91,13 @@ func NextSession(from, event string, deviceReady, mediaReady bool) (string, erro
 		case "CREATED", "WAITING_DEVICE", "STREAM_STARTING", "STOPPING":
 			return "FAILED", nil
 		}
+	case "interrupt":
+		switch from {
+		case "CREATED", "WAITING_DEVICE", "STREAM_STARTING", "ACTIVE", "STOP_PENDING":
+			return "FAILED", nil
+		case "STOPPING":
+			return "CLOSED", nil
+		}
 	}
 	return from, ErrState
 }

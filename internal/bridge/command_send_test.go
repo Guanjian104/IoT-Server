@@ -9,6 +9,17 @@ import (
 	"iot-server/internal/mqttmsg"
 )
 
+func TestReadyWaitsForSubscription(t *testing.T) {
+	bridge := &Bridge{}
+	if bridge.Ready() || bridge.Subscribed() {
+		t.Fatal("unconnected bridge is ready")
+	}
+	bridge.subscribed.Store(true)
+	if !bridge.Subscribed() || bridge.Ready() {
+		t.Fatal("subscription without a connection is ready")
+	}
+}
+
 func TestPersistContextOutlivesPublishCancel(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()

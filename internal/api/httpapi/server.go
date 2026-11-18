@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"iot-server/internal/logger"
+	"iot-server/internal/media"
 	"iot-server/internal/metrics"
 	"iot-server/internal/mqttmsg"
 	"iot-server/internal/store"
@@ -35,6 +36,15 @@ type Server struct {
 	devicePassword  string
 	deadline        time.Duration
 	kicker          Kicker
+	media           media.Provider
+}
+
+// UseMedia 让观看接口签发这个提供者的凭证。未设置时仍返回不可连接的测试凭证。
+func (s *Server) UseMedia(p media.Provider) {
+	if s == nil {
+		return
+	}
+	s.media = p
 }
 
 // New 组装接口。
@@ -409,31 +419,23 @@ func (s *Server) changeGrant(w http.ResponseWriter, r *http.Request, add bool) {
 
 func (s *Server) disableDevice(w http.ResponseWriter, r *http.Request) {
 	s.setAccess(w, r, func(ctx context.Context, tenant, deviceID string) error {
-		if err := s.store.SetEnabled(ctx, tenant, deviceID, false); err != nil {
-			return err
-		}
-		s.kick(ctx, deviceID)
-		return nil
-	})
+		return s.store.SetEnabled(ctx, tenant, deviceID, false)
+	}, true)
 }
 
 func (s *Server) enableDevice(w http.ResponseWriter, r *http.Request) {
 	s.setAccess(w, r, func(ctx context.Context, tenant, deviceID string) error {
 		return s.store.SetEnabled(ctx, tenant, deviceID, true)
-	})
+	}, false)
 }
 
 func (s *Server) revokeDevice(w http.ResponseWriter, r *http.Request) {
 	s.setAccess(w, r, func(ctx context.Context, tenant, deviceID string) error {
-		if err := s.store.SetRevoked(ctx, tenant, deviceID, true); err != nil {
-			return err
-		}
-		s.kick(ctx, deviceID)
-		return nil
-	})
+		return s.store.SetRevoked(ctx, tenant, deviceID, true)
+	}, true)
 }
 
-func (s *Server) setAccess(w http.ResponseWriter, r *http.Request, fn func(context.Context, string, string) error) {
+func (s *Server) setAccess(w http.ResponseWriter, r *http.Request, fn func(context.Context, string, string) error, kick bool) {
 	user, ok := s.user(w, r)
 	if !ok {
 		return
@@ -454,17 +456,36 @@ func (s *Server) setAccess(w http.ResponseWriter, r *http.Request, fn func(conte
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
-	s.log.Info("device access changed", "request_id", requestID(r), "device_id", deviceID)
-	writeJSON(w, http.StatusOK, map[string]any{"device_id": deviceID})
+	body := map[string]any{"device_id": deviceID}
+	if kick {
+		result := s.kick(r.Context(), deviceID)
+		body["kick"] = result
+		if s.log != nil {
+			s.log.Info("device access changed", "request_id", requestID(r), "device_id", deviceID, "kick", result)
+		}
+	} else if s.log != nil {
+		s.log.Info("device access changed", "request_id", requestID(r), "device_id", deviceID)
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
-func (s *Server) kick(ctx context.Context, deviceID string) {
+func (s *Server) kick(ctx context.Context, deviceID string) string {
 	if s.kicker == nil {
-		return
+		return "skipped"
 	}
-	if err := s.kicker.Kick(ctx, deviceID); err != nil && s.log != nil {
-		s.log.Warn("device kick failed", "device_id", deviceID)
+	if err := s.kicker.Kick(ctx, deviceID); err != nil {
+		if s.metrics != nil {
+			s.metrics.NoteKick(false)
+		}
+		if s.log != nil {
+			s.log.Warn("device kick failed", "device_id", deviceID)
+		}
+		return "failed"
 	}
+	if s.metrics != nil {
+		s.metrics.NoteKick(true)
+	}
+	return "ok"
 }
 
 func (s *Server) metricsText(w http.ResponseWriter, r *http.Request) {

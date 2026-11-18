@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"iot-server/internal/media"
 	"iot-server/internal/mqttmsg"
 	"iot-server/internal/store"
 )
@@ -66,18 +67,57 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request) {
 		if result.Replayed {
 			status = http.StatusOK
 		}
+		credential, err := s.watchCredential(r.Context(), result)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "unavailable")
+			return
+		}
 		writeJSON(w, status, map[string]any{
 			"session_id":     result.SessionID,
 			"generation":     result.Generation,
 			"session_status": result.SessionStatus,
 			"viewer_id":      result.ViewerID,
-			"credential": map[string]any{
-				"provider":    "test",
-				"connectable": false,
-				"token":       result.Credential,
-			},
+			"credential":     credential,
 		})
 	})
+}
+
+type subscribeLocator interface {
+	SubscribeURL(resourceID string) string
+}
+
+func (s *Server) watchCredential(ctx context.Context, result store.WatchResult) (map[string]any, error) {
+	if s.media == nil {
+		return map[string]any{
+			"provider":    "test",
+			"connectable": false,
+			"token":       result.Credential,
+		}, nil
+	}
+	room, err := s.media.CreateRoom(ctx, media.RoomRequest{SessionID: result.SessionID, Generation: result.Generation})
+	if err != nil {
+		return nil, err
+	}
+	expires := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Second)
+	issued, err := s.media.CreateJoinCredential(ctx, media.JoinRequest{
+		ResourceID: room.ID,
+		Identity:   "viewer:" + result.ViewerID,
+		ExpiresAt:  expires,
+	})
+	if err != nil {
+		return nil, err
+	}
+	body := map[string]any{
+		"provider":    issued.Provider,
+		"connectable": issued.Connectable,
+		"token":       issued.Token,
+		"expires_at":  issued.ExpiresAt.UTC().Format(time.RFC3339),
+		"resource_id": room.ID,
+	}
+	if locator, ok := s.media.(subscribeLocator); ok {
+		body["whep_url"] = locator.SubscribeURL(room.ID)
+	}
+	return body, nil
 }
 
 func (s *Server) heartbeatViewer(w http.ResponseWriter, r *http.Request) {

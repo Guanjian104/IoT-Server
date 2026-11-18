@@ -120,7 +120,19 @@ func (s *Store) GetCommand(ctx context.Context, tenant, commandID string) (Comma
 	return command, nil
 }
 
+// commandBlocksDevice 报告这条命令是否还占着设备。
+// 占着时不能再领取同一设备的下一条。SQL 里的状态列表与这里一致。
+func commandBlocksDevice(state string) bool {
+	switch state {
+	case "sending", "sent", "uncertain", "needs_attention":
+		return true
+	default:
+		return false
+	}
+}
+
 // PullPending 领取尚未交给 Broker 的命令。设备已禁用、吊销或消失时直接取消，不进入 sending。
+// 同一设备一次只领取最早的一条，且设备上还有未结束命令时不领取下一条。
 func (s *Store) PullPending(ctx context.Context, tenant string, limit int) ([]Outbound, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -128,10 +140,18 @@ func (s *Store) PullPending(ctx context.Context, tenant string, limit int) ([]Ou
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `
-		SELECT command_id, device_id, payload, attempts, deadline_at
-		FROM device_command
-		WHERE tenant_id = ? AND state = 'pending' AND deadline_at > UTC_TIMESTAMP(3)
-		ORDER BY created_at
+		SELECT c.command_id, c.device_id, c.payload, c.attempts, c.deadline_at
+		FROM device_command AS c
+		WHERE c.tenant_id = ? AND c.state = 'pending' AND c.deadline_at > UTC_TIMESTAMP(3)
+		  AND NOT EXISTS (
+		    SELECT 1 FROM device_command AS b
+		    WHERE b.tenant_id = c.tenant_id AND b.device_id = c.device_id AND b.command_id <> c.command_id
+		      AND (
+		        b.state IN ('sending', 'sent', 'uncertain', 'needs_attention')
+		        OR (b.state = 'pending' AND (b.created_at < c.created_at OR (b.created_at = c.created_at AND b.command_id < c.command_id)))
+		      )
+		  )
+		ORDER BY c.created_at, c.command_id
 		LIMIT ?
 		FOR UPDATE SKIP LOCKED`, tenant, limit)
 	if err != nil {
@@ -452,6 +472,18 @@ func (s *Store) Maintain(ctx context.Context, tenant string) (int, error) {
 		return 0, s.unavailable("maintain", err)
 	}
 	return int(timedOut), nil
+}
+
+// CommandAttention 统计仍要人工处理的命令。uncertain 和 needs_attention 都算积压。
+func (s *Store) CommandAttention(ctx context.Context, tenant string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM device_command
+		WHERE tenant_id = ? AND state IN ('uncertain', 'needs_attention')`, tenant).Scan(&n)
+	if err != nil {
+		return 0, s.unavailable("command_attention", err)
+	}
+	return n, nil
 }
 
 func deviceEligible(ctx context.Context, tx *sql.Tx, tenant, deviceID string) (bool, error) {

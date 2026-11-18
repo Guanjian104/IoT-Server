@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,13 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 )
+
+func hookListenAddr() string {
+	if addr := os.Getenv("IOT_INTEGRATION_HOOK_ADDR"); addr != "" {
+		return addr
+	}
+	return "127.0.0.1:18082"
+}
 
 func TestP1IsolatedLoop(t *testing.T) {
 	secrets := loadSecrets(t)
@@ -42,13 +50,18 @@ func TestP1IsolatedLoop(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "server.log")
 	stop := startServer(t, bin, logPath, map[string]string{
 		"IOT_HTTP_ADDR":   "127.0.0.1:18080",
-		"IOT_HOOK_ADDR":   "127.0.0.1:18082",
+		"IOT_HOOK_ADDR":   hookListenAddr(),
 		"IOT_INSTANCE_ID": "iot-dev-1",
 	}, secrets)
 	t.Cleanup(stop)
 	base := "http://127.0.0.1:18080"
 	waitReady(t, base)
 	waitLog(t, logPath, "mqtt subscribed", secrets)
+	readyBody := map[string]string{}
+	getJSON(t, base+"/health/ready", "", &readyBody)
+	if readyBody["status"] != "ready" || readyBody["mqtt_subscribed"] != "true" {
+		t.Fatalf("ready = %#v", readyBody)
+	}
 
 	admin := login(t, base, "admin", os.Getenv("IOT_SEED_ADMIN_PASSWORD"), secrets)
 	operator := login(t, base, "operator", os.Getenv("IOT_SEED_OPERATOR_PASSWORD"), secrets)
@@ -98,6 +111,21 @@ func TestP1IsolatedLoop(t *testing.T) {
 
 	sim := startDevice(t, deviceID, true, 0)
 	waitStatusField(t, base, admin, deviceID, "mqtt_online", true)
+	statusBody := map[string]any{}
+	getJSON(t, base+"/api/v1/devices/"+deviceID+"/status", admin, &statusBody)
+	generation, ok := statusBody["generation_ms"].(float64)
+	if !ok || generation <= 0 {
+		t.Fatalf("generation = %#v", statusBody["generation_ms"])
+	}
+	if _, err := db.Exec(`UPDATE device_presence SET mqtt_online = 0 WHERE tenant_id = 'dev' AND device_id = ?`, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	waitStatusField(t, base, admin, deviceID, "mqtt_online", true)
+	getJSON(t, base+"/api/v1/devices/"+deviceID+"/status", admin, &statusBody)
+	got, ok := statusBody["generation_ms"].(float64)
+	if !ok || got < generation || got-generation > 2000 {
+		t.Fatalf("calibration generation = %#v, before %v", statusBody["generation_ms"], generation)
+	}
 	waitStatusField(t, base, admin, deviceID, "reported_status", "online")
 	body := map[string]any{}
 	getJSON(t, base+"/api/v1/devices/"+deviceID+"/status", admin, &body)
@@ -123,6 +151,21 @@ func TestP1IsolatedLoop(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM device_property_history WHERE tenant_id = 'dev' AND device_id = ? AND msg_id = 's3-1'`, deviceID).Scan(&count); err != nil || count != 4 {
 		t.Fatalf("reused msgId history = %d %v", count, err)
 	}
+	publish(t, sim.client, mqttmsg.DeviceTopic(deviceID, "report"), []byte(`{"deviceId":"`+deviceID+`","msgId":"s3-new","time":1762070402000,"data":{"switch_light":{"value":true,"time":1762070402000}}}`), false)
+	waitProperty(t, base, admin, deviceID, "switch_light", true)
+	publish(t, sim.client, mqttmsg.DeviceTopic(deviceID, "report"), []byte(`{"deviceId":"`+deviceID+`","msgId":"s3-old","time":1762070401000,"data":{"switch_light":{"value":false,"time":1762070401000}}}`), false)
+	time.Sleep(400 * time.Millisecond)
+	var light []byte
+	var reported int64
+	if err := db.QueryRow(`SELECT value_json, reported_at_ms FROM device_property_current WHERE tenant_id = 'dev' AND device_id = ? AND identifier = 'switch_light'`, deviceID).Scan(&light, &reported); err != nil {
+		t.Fatal(err)
+	}
+	if string(light) != "true" || reported != 1762070402000 {
+		t.Fatalf("older report overwrote current light=%s at=%d", light, reported)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM device_property_history WHERE tenant_id = 'dev' AND device_id = ? AND msg_id = 's3-old'`, deviceID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("older report history = %d %v", count, err)
+	}
 	props := map[string]any{}
 	getJSON(t, base+"/api/v1/devices/"+deviceID+"/properties", admin, &props)
 	encoded, _ := json.Marshal(props)
@@ -145,9 +188,28 @@ func TestP1IsolatedLoop(t *testing.T) {
 	}
 	waitCommand(t, base, admin, command["command_id"].(string), "accepted")
 	waitProperty(t, base, admin, deviceID, "switch_light", true)
-	if sim.count() != 1 {
-		t.Fatalf("publishes = %d", sim.count())
+	if sim.count() != 1 || sim.executions() != 1 {
+		t.Fatalf("publishes = %d executions = %d", sim.count(), sim.executions())
 	}
+	var setMsgID string
+	var setPayload []byte
+	if err := db.QueryRow(`SELECT msg_id, payload FROM device_command WHERE command_id = ?`, command["command_id"]).Scan(&setMsgID, &setPayload); err != nil {
+		t.Fatal(err)
+	}
+	var lightHistory int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM device_property_history WHERE tenant_id = 'dev' AND device_id = ? AND msg_id = ?`, deviceID, "r-"+setMsgID).Scan(&lightHistory); err != nil || lightHistory != 1 {
+		t.Fatalf("command history = %d %v", lightHistory, err)
+	}
+	publishAsService(t, mqttmsg.DeviceTopic(deviceID, "set"), setPayload)
+	waitSimCount(t, sim, 2)
+	time.Sleep(400 * time.Millisecond)
+	if sim.executions() != 1 || sim.replyCount() != 2 {
+		t.Fatalf("duplicate msgId executions = %d replies = %d", sim.executions(), sim.replyCount())
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM device_property_history WHERE tenant_id = 'dev' AND device_id = ? AND msg_id = ?`, deviceID, "r-"+setMsgID).Scan(&lightHistory); err != nil || lightHistory != 1 {
+		t.Fatalf("duplicate command history = %d %v", lightHistory, err)
+	}
+	waitCommand(t, base, admin, command["command_id"].(string), "accepted")
 
 	silentID := newDevice(t, base, admin)
 	grant(t, base, admin, silentID, "operator", "manage")
@@ -178,7 +240,10 @@ func TestP1IsolatedLoop(t *testing.T) {
 	otherSim.client.Subscribe("#", 1, nil).WaitTimeout(3 * time.Second)
 	waitDisconnect(t, otherSim.client)
 
-	postJSON(t, base+"/api/v1/devices/"+deviceID+"/disable", admin, map[string]any{}, nil)
+	disabled := map[string]any{}
+	if status := postJSON(t, base+"/api/v1/devices/"+deviceID+"/disable", admin, map[string]any{}, &disabled); status != http.StatusOK || disabled["kick"] != "ok" {
+		t.Fatalf("disable = %d %#v", status, disabled)
+	}
 	waitDisconnect(t, sim.client)
 	assertConnectDenied(t, deviceID, os.Getenv("IOT_MQTT_DEVICE_PASSWORD"), secrets)
 	postJSON(t, base+"/api/v1/devices/"+deviceID+"/enable", admin, map[string]any{}, nil)
@@ -187,29 +252,77 @@ func TestP1IsolatedLoop(t *testing.T) {
 	stop2 := startServer(t, bin, log2, map[string]string{
 		"IOT_HTTP_ADDR":   "127.0.0.1:18081",
 		"IOT_HOOK_ADDR":   "",
+		"IOT_SFU_ADDR":    "",
 		"IOT_INSTANCE_ID": "iot-dev-2",
 	}, secrets)
 	t.Cleanup(stop2)
 	waitReady(t, "http://127.0.0.1:18081")
 	waitLog(t, log2, "mqtt subscribed", secrets)
+	ready2 := map[string]string{}
+	getJSON(t, "http://127.0.0.1:18081/health/ready", "", &ready2)
+	if ready2["status"] != "ready" || ready2["mqtt_subscribed"] != "true" {
+		t.Fatalf("server 2 ready = %#v", ready2)
+	}
 	dualID := newDevice(t, base, admin)
 	grant(t, base, admin, dualID, "operator", "manage")
 	dual := startDevice(t, dualID, true, 0)
 	dualCommand := map[string]any{}
 	postJSON(t, base+"/api/v1/devices/"+dualID+"/commands", operator, map[string]any{"identifier": "switch_bask", "value": true}, &dualCommand)
 	waitCommand(t, base, admin, dualCommand["command_id"].(string), "accepted")
-	if dual.count() != 1 {
-		t.Fatalf("dual publishes = %d", dual.count())
+	if dual.count() != 1 || dual.executions() != 1 {
+		t.Fatalf("dual publishes = %d executions = %d", dual.count(), dual.executions())
+	}
+	dual.pauseReplies()
+	first := map[string]any{}
+	second := map[string]any{}
+	if status := postJSON(t, base+"/api/v1/devices/"+dualID+"/commands", operator, map[string]any{"identifier": "switch_fan", "value": true}, &first); status != http.StatusAccepted {
+		t.Fatalf("first serial command = %d", status)
+	}
+	if status := postJSON(t, base+"/api/v1/devices/"+dualID+"/commands", operator, map[string]any{"identifier": "switch_feed", "value": true}, &second); status != http.StatusAccepted {
+		t.Fatalf("second serial command = %d", status)
+	}
+	waitSimCount(t, dual, 2)
+	time.Sleep(800 * time.Millisecond)
+	if dual.count() != 2 {
+		t.Fatalf("second command left the queue early: %d", dual.count())
+	}
+	dual.resumeReplies()
+	waitCommand(t, base, admin, first["command_id"].(string), "accepted")
+	waitCommand(t, base, admin, second["command_id"].(string), "accepted")
+	if dual.count() != 3 || dual.executions() != 3 {
+		t.Fatalf("serial publishes = %d executions = %d", dual.count(), dual.executions())
 	}
 
 	for i := 0; i < 5; i++ {
-		postAuth(t, "http://127.0.0.1:18082", os.Getenv("IOT_MQTT_HOOK_TOKEN"))
+		postAuth(t, "http://"+hookListenAddr(), os.Getenv("IOT_MQTT_HOOK_TOKEN"))
 	}
 	waitLog(t, logPath, "mqtt_auth_deny_spike", secrets)
 	metricsBody := getRaw(t, base+"/metrics")
 	if strings.Contains(metricsBody, deviceID) || !strings.Contains(metricsBody, "iot_mqtt_auth_deny_total") {
 		t.Fatal("metrics label check failed")
 	}
+	if !strings.Contains(metricsBody, `iot_device_kick_total{result="ok"}`) || !strings.Contains(metricsBody, `iot_device_kick_total{result="failed"}`) || !strings.Contains(metricsBody, "iot_command_attention ") {
+		t.Fatal("ops metrics missing")
+	}
+	beforeAttention := map[string]string{}
+	getJSON(t, base+"/health/ready", "", &beforeAttention)
+	attentionID := "m10att00-0000-4000-8000-000000000001"
+	if _, err := db.Exec(`DELETE FROM device_command WHERE command_id = ?`, attentionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO device_command (command_id, tenant_id, device_id, msg_id, state, payload, deadline_at) VALUES (?, 'dev', ?, 'srv-m10-attention', 'needs_attention', ?, DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 1 HOUR))`, attentionID, dualID, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM device_command WHERE command_id = ?`, attentionID) })
+	nextAttention := strconv.Itoa(attentionCount(beforeAttention["command_attention"]) + 1)
+	waitReadyValue(t, base, "command_attention", nextAttention)
+	if body := getRaw(t, base+"/metrics"); !strings.Contains(body, "iot_command_attention "+nextAttention) {
+		t.Fatalf("attention metric = %s", body)
+	}
+	if _, err := db.Exec(`DELETE FROM device_command WHERE command_id = ?`, attentionID); err != nil {
+		t.Fatal(err)
+	}
+	waitReadyValue(t, base, "command_attention", beforeAttention["command_attention"])
 
 	if err := exec.Command("docker", "stop", "iot-dev-redis").Run(); err != nil {
 		t.Fatal(err)
@@ -335,7 +448,7 @@ func childEnv(overrides map[string]string) []string {
 		"IOT_MQTT_SERVICE_PASSWORD", "IOT_MQTT_DEVICE_USERNAME", "IOT_MQTT_DEVICE_PASSWORD", "IOT_MQTT_HOOK_TOKEN",
 		"IOT_EMQX_API_URL", "IOT_EMQX_API_USER", "IOT_EMQX_API_PASSWORD", "IOT_SEED_ADMIN_PASSWORD", "IOT_SEED_OPERATOR_PASSWORD",
 		"IOT_STOP_DELAY", "IOT_VIEWER_JOIN_GRACE", "IOT_CALL_RING_TIMEOUT",
-		"IOT_HOOK_ADDR", "IOT_ENABLE_TEST_CONTROLS",
+		"IOT_HOOK_ADDR", "IOT_SFU_ADDR", "IOT_ENABLE_TEST_CONTROLS",
 	}
 	env := []string{"TZ=UTC", "GOTOOLCHAIN=local"}
 	for _, key := range keys {
@@ -609,6 +722,58 @@ func waitProperty(t *testing.T, base, token, deviceID, identifier string, want b
 	t.Fatalf("property %s did not become %v", identifier, want)
 }
 
+func waitSimCount(t *testing.T, sim *deviceSim, want int) {
+	t.Helper()
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		if sim.count() >= want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("device saw %d sets, want %d", sim.count(), want)
+}
+
+func publishAsService(t *testing.T, topic string, payload []byte) {
+	t.Helper()
+	opts := clientOptions(mqttmsg.ServiceClientID("iot-dev-probe"), mqttmsg.ServiceUsername, os.Getenv("IOT_MQTT_SERVICE_PASSWORD"))
+	opts.SetCleanSession(true)
+	client := mqtt.NewClient(opts)
+	token := client.Connect()
+	if !token.WaitTimeout(8*time.Second) || token.Error() != nil {
+		reason := "timeout"
+		if token.Error() != nil {
+			reason = token.Error().Error()
+		}
+		t.Fatal(scrub("service publish connect failed: "+reason, []string{os.Getenv("IOT_MQTT_SERVICE_PASSWORD"), os.Getenv("IOT_MQTT_DEVICE_PASSWORD")}))
+	}
+	defer client.Disconnect(100)
+	publish(t, client, topic, payload, false)
+}
+
+func waitReadyValue(t *testing.T, base, key, want string) {
+	t.Helper()
+	deadline := time.Now().Add(12 * time.Second)
+	var last map[string]string
+	for time.Now().Before(deadline) {
+		last = map[string]string{}
+		getJSON(t, base+"/health/ready", "", &last)
+		if last["status"] == "ready" && last[key] == want {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("ready %s = %#v, want %s", key, last, want)
+}
+
+func attentionCount(value string) int {
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 func waitCommand(t *testing.T, base, token, commandID, want string) {
 	t.Helper()
 	deadline := time.Now().Add(12 * time.Second)
@@ -626,9 +791,16 @@ func waitCommand(t *testing.T, base, token, commandID, want string) {
 }
 
 type deviceSim struct {
-	mu     sync.Mutex
-	client mqtt.Client
-	sets   [][]byte
+	mu       sync.Mutex
+	client   mqtt.Client
+	sets     [][]byte
+	deferred [][]byte
+	executed map[string]struct{}
+	replies  int
+	pause    bool
+	reply    bool
+	code     int
+	deviceID string
 }
 
 func (s *deviceSim) count() int {
@@ -637,40 +809,93 @@ func (s *deviceSim) count() int {
 	return len(s.sets)
 }
 
-func (s *deviceSim) add(payload []byte) {
+func (s *deviceSim) executions() int {
 	s.mu.Lock()
-	s.sets = append(s.sets, payload)
+	defer s.mu.Unlock()
+	return len(s.executed)
+}
+
+func (s *deviceSim) replyCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.replies
+}
+
+func (s *deviceSim) pauseReplies() {
+	s.mu.Lock()
+	s.pause = true
 	s.mu.Unlock()
+}
+
+func (s *deviceSim) resumeReplies() {
+	s.mu.Lock()
+	s.pause = false
+	batch := s.deferred
+	s.deferred = nil
+	client := s.client
+	s.mu.Unlock()
+	for _, payload := range batch {
+		s.respond(client, payload)
+	}
+}
+
+func (s *deviceSim) respond(client mqtt.Client, payload []byte) {
+	if !s.reply || client == nil {
+		return
+	}
+	var doc struct {
+		MsgID string          `json:"msgId"`
+		Data  map[string]bool `json:"data"`
+	}
+	if json.Unmarshal(payload, &doc) != nil || doc.MsgID == "" {
+		return
+	}
+	s.mu.Lock()
+	_, done := s.executed[doc.MsgID]
+	if !done {
+		if s.executed == nil {
+			s.executed = map[string]struct{}{}
+		}
+		s.executed[doc.MsgID] = struct{}{}
+	}
+	s.replies++
+	code := s.code
+	deviceID := s.deviceID
+	s.mu.Unlock()
+	replyBody := fmt.Sprintf(`{"deviceId":"%s","msgId":"%s","time":%d,"code":%d}`, deviceID, doc.MsgID, time.Now().UnixMilli(), code)
+	client.Publish(mqttmsg.DeviceTopic(deviceID, "reply"), 1, false, replyBody).WaitTimeout(3 * time.Second)
+	if done {
+		return
+	}
+	for identifier, value := range doc.Data {
+		report := fmt.Sprintf(`{"deviceId":"%s","msgId":"%s","time":%d,"data":{"%s":{"value":%t,"time":%d}}}`, deviceID, "r-"+doc.MsgID, time.Now().UnixMilli(), identifier, value, time.Now().UnixMilli())
+		client.Publish(mqttmsg.DeviceTopic(deviceID, "report"), 1, false, report).WaitTimeout(3 * time.Second)
+	}
 }
 
 func startDevice(t *testing.T, deviceID string, reply bool, code int) *deviceSim {
 	t.Helper()
-	sim := &deviceSim{}
+	sim := &deviceSim{reply: reply, code: code, deviceID: deviceID}
 	ready := make(chan struct{})
 	var once sync.Once
 	opts := clientOptions(deviceID, "root", os.Getenv("IOT_MQTT_DEVICE_PASSWORD"))
+	opts.SetOrderMatters(false)
 	opts.SetWill(mqttmsg.DeviceTopic(deviceID, "status"), "offline", 1, true)
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		client.Publish(mqttmsg.DeviceTopic(deviceID, "status"), 1, true, "online")
 		token := client.Subscribe(mqttmsg.DeviceTopic(deviceID, "set"), 1, func(_ mqtt.Client, msg mqtt.Message) {
 			payload := append([]byte(nil), msg.Payload()...)
-			sim.add(payload)
-			if !reply {
+			sim.mu.Lock()
+			sim.sets = append(sim.sets, payload)
+			paused := sim.pause
+			if paused {
+				sim.deferred = append(sim.deferred, payload)
+			}
+			sim.mu.Unlock()
+			if paused {
 				return
 			}
-			var doc struct {
-				MsgID string          `json:"msgId"`
-				Data  map[string]bool `json:"data"`
-			}
-			if json.Unmarshal(payload, &doc) != nil {
-				return
-			}
-			replyBody := fmt.Sprintf(`{"deviceId":"%s","msgId":"%s","time":%d,"code":%d}`, deviceID, doc.MsgID, time.Now().UnixMilli(), code)
-			client.Publish(mqttmsg.DeviceTopic(deviceID, "reply"), 1, false, replyBody)
-			for identifier, value := range doc.Data {
-				report := fmt.Sprintf(`{"deviceId":"%s","msgId":"%s","time":%d,"data":{"%s":{"value":%t,"time":%d}}}`, deviceID, "r-"+doc.MsgID, time.Now().UnixMilli(), identifier, value, time.Now().UnixMilli())
-				client.Publish(mqttmsg.DeviceTopic(deviceID, "report"), 1, false, report)
-			}
+			sim.respond(client, payload)
 		})
 		go func() {
 			token.WaitTimeout(3 * time.Second)

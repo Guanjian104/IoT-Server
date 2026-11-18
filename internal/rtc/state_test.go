@@ -50,6 +50,25 @@ func TestSessionPath(t *testing.T) {
 	}
 }
 
+func TestMediaInterruptEndsTheRound(t *testing.T) {
+	for _, from := range []string{"CREATED", "WAITING_DEVICE", "STREAM_STARTING", "ACTIVE", "STOP_PENDING"} {
+		next, err := NextSession(from, "interrupt", true, false)
+		if err != nil || next != "FAILED" {
+			t.Fatalf("%s -> %s %v", from, next, err)
+		}
+	}
+	next, err := NextSession("STOPPING", "interrupt", true, false)
+	if err != nil || next != "CLOSED" {
+		t.Fatalf("stopping -> %s %v", next, err)
+	}
+	if _, err := NextSession("CLOSED", "interrupt", true, true); err != ErrState {
+		t.Fatal("closed moved")
+	}
+	if _, err := NextSession("FAILED", "interrupt", true, true); err != ErrState {
+		t.Fatal("failed moved")
+	}
+}
+
 func TestViewerAndCall(t *testing.T) {
 	if next, err := NextViewer("LEFT", "heartbeat"); err != ErrState || next != "LEFT" {
 		t.Fatal("heartbeat revived left")

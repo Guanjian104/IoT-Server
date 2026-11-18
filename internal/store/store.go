@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"iot-server/internal/config"
 	"iot-server/internal/logger"
+	"iot-server/internal/media"
 )
 
 var (
@@ -36,13 +37,22 @@ var (
 
 // Store 是业务表的访问入口。
 type Store struct {
-	db          *sql.DB
-	rdb         *redis.Client
-	log         logger.Logger
-	stopDelay   time.Duration
-	joinGrace   time.Duration
-	ringTimeout time.Duration
-	taskLease   time.Duration
+	db            *sql.DB
+	rdb           *redis.Client
+	log           logger.Logger
+	stopDelay     time.Duration
+	joinGrace     time.Duration
+	ringTimeout   time.Duration
+	taskLease     time.Duration
+	mediaProvider media.Provider
+}
+
+// UseMedia 让开流和结束使用这个媒体提供者。未设置时仍使用测试替身。
+func (s *Store) UseMedia(p media.Provider) {
+	if s == nil {
+		return
+	}
+	s.mediaProvider = p
 }
 
 // Open 打开 MySQL 连接池。网络失败留到 Ping，不在这里阻塞。

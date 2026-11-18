@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -17,21 +18,24 @@ import (
 	"iot-server/internal/logger"
 	"iot-server/internal/metrics"
 	"iot-server/internal/migrate"
+	"iot-server/internal/sfu"
 	"iot-server/internal/store"
 )
 
 type runtime struct {
-	cfg      config.Config
-	log      logger.Logger
-	db       *sql.DB
-	rdb      *redis.Client
-	store    *store.Store
-	bridge   *bridge.Bridge
-	kicker   *emqx.Client
-	metrics  *metrics.Metrics
-	migrated bool
-	once     sync.Once
-	workOnce sync.Once
+	cfg       config.Config
+	log       logger.Logger
+	db        *sql.DB
+	rdb       *redis.Client
+	store     *store.Store
+	bridge    *bridge.Bridge
+	kicker    *emqx.Client
+	metrics   *metrics.Metrics
+	sfu       *sfu.Node
+	migrated  bool
+	attention int
+	once      sync.Once
+	workOnce  sync.Once
 }
 
 func boot(ctx context.Context, cfg config.Config, log logger.Logger) (*runtime, error) {
@@ -41,6 +45,9 @@ func boot(ctx context.Context, cfg config.Config, log logger.Logger) (*runtime, 
 		metrics: metrics.New(buildinfo.Version, buildinfo.Revision, cfg.InstanceID),
 	}
 	if !cfg.Dependencies() {
+		if err := rt.openSFU(); err != nil {
+			return nil, err
+		}
 		return rt, nil
 	}
 	if cfg.MySQLOn() {
@@ -64,9 +71,35 @@ func boot(ctx context.Context, cfg config.Config, log logger.Logger) (*runtime, 
 		rt.kicker = emqx.New(cfg.EMQXAPIURL, cfg.EMQXAPIUser, cfg.EMQXAPIPassword)
 		if rt.store != nil {
 			rt.bridge = bridge.New(ctx, cfg, rt.store, log, rt.metrics)
+			rt.bridge.UseSessions(rt.kicker)
 		}
 	}
+	if err := rt.openSFU(); err != nil {
+		rt.Close()
+		return nil, err
+	}
 	return rt, nil
+}
+
+func (rt *runtime) openSFU() error {
+	if rt.cfg.SFUAddr == "" {
+		return nil
+	}
+	node, err := sfu.Listen(rt.cfg.SFUAddr)
+	if err != nil {
+		if rt.log != nil {
+			rt.log.Error("listen failed", "config_key", "IOT_SFU_ADDR")
+		}
+		return errors.New("listen failed")
+	}
+	rt.sfu = node
+	if rt.store != nil {
+		rt.store.UseMedia(node.Media())
+	}
+	if rt.log != nil {
+		rt.log.Info("sfu listening", "addr", rt.cfg.SFUAddr)
+	}
+	return nil
 }
 
 func (rt *runtime) Mount(mux *http.ServeMux) {
@@ -89,7 +122,11 @@ func (rt *runtime) api() *httpapi.Server {
 	if rt == nil || rt.store == nil {
 		return nil
 	}
-	return httpapi.New(rt.store, rt.log, rt.metrics, rt.cfg.TenantID, rt.cfg.MQTTHookToken, rt.cfg.MQTTServicePass, rt.cfg.MQTTDevicePass, rt.cfg.CommandDeadline, rt.kicker)
+	api := httpapi.New(rt.store, rt.log, rt.metrics, rt.cfg.TenantID, rt.cfg.MQTTHookToken, rt.cfg.MQTTServicePass, rt.cfg.MQTTDevicePass, rt.cfg.CommandDeadline, rt.kicker)
+	if rt.sfu != nil {
+		api.UseMedia(rt.sfu.Media())
+	}
+	return api
 }
 
 func (rt *runtime) watch(ctx context.Context, gate *readyGate) {
@@ -145,16 +182,29 @@ func (rt *runtime) sync(ctx context.Context, gate *readyGate) {
 		redisOK = err == nil
 	}
 	mqttOK := !rt.cfg.MQTTOn()
+	mqttSubscribed := !rt.cfg.MQTTOn()
 	if rt.cfg.MQTTOn() && rt.bridge != nil && rt.migrated {
 		rt.bridge.Ensure()
-		mqttOK = rt.bridge.Connected()
+		mqttSubscribed = rt.bridge.Ready()
+		mqttOK = mqttSubscribed
+	}
+	attention := rt.attention
+	if mysqlOK && rt.store != nil {
+		countCtx, countCancel := context.WithTimeout(ctx, time.Second)
+		n, err := rt.store.CommandAttention(countCtx, rt.cfg.TenantID)
+		countCancel()
+		if err == nil {
+			attention = n
+			rt.attention = n
+		}
 	}
 	if rt.metrics != nil {
 		rt.metrics.SetDependency("mysql", mysqlOK)
 		rt.metrics.SetDependency("redis", redisOK)
 		rt.metrics.SetDependency("mqtt", mqttOK)
+		rt.metrics.SetCommandAttention(attention)
 	}
-	gate.Set(mysqlOK && redisOK && mqttOK)
+	gate.Publish(health.Report{Ready: mysqlOK && redisOK && mqttOK, MQTTSubscribed: mqttSubscribed, CommandAttention: attention})
 }
 
 func (rt *runtime) startRTC(ctx context.Context) {
@@ -184,6 +234,9 @@ func (rt *runtime) Close() {
 		return
 	}
 	rt.once.Do(func() {
+		if rt.sfu != nil {
+			_ = rt.sfu.Close()
+		}
 		if rt.bridge != nil {
 			rt.bridge.Close()
 		}
@@ -203,12 +256,16 @@ type readyGate struct {
 }
 
 func (g *readyGate) Set(ready bool) {
+	g.Publish(health.Report{Ready: ready, MQTTSubscribed: ready})
+}
+
+func (g *readyGate) Publish(report health.Report) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
 		return
 	}
-	g.state.SetReady(ready)
+	g.state.Publish(report)
 }
 
 func (g *readyGate) Close() {

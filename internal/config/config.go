@@ -21,6 +21,7 @@ type Lookup func(key string) (string, bool)
 type Config struct {
 	HTTPAddr           string
 	HookAddr           string
+	SFUAddr            string
 	InstanceID         string
 	ConfigVersion      string
 	LogLevel           string
@@ -56,6 +57,7 @@ type Config struct {
 var knownKeys = []string{
 	"IOT_HTTP_ADDR",
 	"IOT_HOOK_ADDR",
+	"IOT_SFU_ADDR",
 	"IOT_INSTANCE_ID",
 	"IOT_CONFIG_VERSION",
 	"IOT_LOG_LEVEL",

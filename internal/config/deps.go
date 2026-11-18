@@ -59,6 +59,12 @@ func finish(cfg Config, values map[string]string) (Config, error) {
 		}
 		cfg.HookAddr = value
 	}
+	if value := strings.TrimSpace(values["IOT_SFU_ADDR"]); value != "" {
+		if err := validateLocalAddr(value, false); err != nil || value == cfg.HTTPAddr || value == cfg.HookAddr {
+			return Config{}, errors.New("invalid IOT_SFU_ADDR")
+		}
+		cfg.SFUAddr = value
+	}
 	switch strings.ToLower(strings.TrimSpace(values["IOT_ENABLE_TEST_CONTROLS"])) {
 	case "", "0", "false":
 		cfg.EnableTestControls = false

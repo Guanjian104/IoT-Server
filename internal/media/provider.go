@@ -1,4 +1,4 @@
-// Package media 定义与厂商无关的媒体接口。P2 只有测试替身，不产生可连接的 WebRTC 凭证。
+// Package media 定义与厂商无关的媒体接口。测试替身不可连接；可连接的适配器由调用方注入。
 package media
 
 import (
@@ -30,10 +30,12 @@ type RoomRequest struct {
 	Generation int64
 }
 
-// Room 是统一资源模型。
+// Room 是统一资源模型。Created 为 true 表示这次调用新建了房间。
 type Room struct {
 	ID        string
 	SessionID string
+	Provider  string
+	Created   bool
 }
 
 // JoinRequest 描述一次短期加入。
@@ -73,7 +75,7 @@ func (TestProvider) Capabilities() Capabilities {
 
 // CreateRoom 生成与会话 ID 不同的资源 ID。
 func (TestProvider) CreateRoom(_ context.Context, req RoomRequest) (Room, error) {
-	return Room{ID: "test:" + req.SessionID, SessionID: req.SessionID}, nil
+	return Room{ID: "test:" + req.SessionID, SessionID: req.SessionID, Provider: "test", Created: true}, nil
 }
 
 // DeleteRoom 对测试资源没有外部副作用。

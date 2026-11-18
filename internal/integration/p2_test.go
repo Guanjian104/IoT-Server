@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,7 +32,8 @@ func TestP2ControlPlane(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "server.log")
 	stop := startServer(t, bin, logPath, map[string]string{
 		"IOT_HTTP_ADDR":            "127.0.0.1:18080",
-		"IOT_HOOK_ADDR":            "127.0.0.1:18082",
+		"IOT_HOOK_ADDR":            hookListenAddr(),
+		"IOT_SFU_ADDR":             "127.0.0.1:18090",
 		"IOT_ENABLE_TEST_CONTROLS": "1",
 		"IOT_INSTANCE_ID":          "iot-dev-1",
 		"IOT_STOP_DELAY":           "1s",
@@ -40,7 +42,7 @@ func TestP2ControlPlane(t *testing.T) {
 	}, secrets)
 	t.Cleanup(stop)
 	base := "http://127.0.0.1:18080"
-	hook := "http://127.0.0.1:18082"
+	hook := "http://" + hookListenAddr()
 	waitReady(t, base)
 	admin := login(t, base, "admin", os.Getenv("IOT_SEED_ADMIN_PASSWORD"), secrets)
 	operator := login(t, base, "operator", os.Getenv("IOT_SEED_OPERATOR_PASSWORD"), secrets)
@@ -52,8 +54,8 @@ func TestP2ControlPlane(t *testing.T) {
 	}
 	grant(t, base, admin, deviceID, "operator", "view")
 	first := doWatch(t, base, operator, deviceID, ticket, "phone", "w1")
-	if first.Credential.Connectable || first.Credential.Provider != "test" || first.SessionStatus == "ACTIVE" {
-		t.Fatalf("watch started too ready: %+v", first.SessionStatus)
+	if !first.Credential.Connectable || first.Credential.Provider != "pion" || first.SessionStatus == "ACTIVE" {
+		t.Fatalf("watch credential provider=%s connectable=%t status=%s", first.Credential.Provider, first.Credential.Connectable, first.SessionStatus)
 	}
 	replay := doWatch(t, base, operator, deviceID, ticket, "phone", "w1")
 	if !replay.Replayed && replay.ViewerID != first.ViewerID {
@@ -61,6 +63,9 @@ func TestP2ControlPlane(t *testing.T) {
 	}
 	if replay.ViewerID != first.ViewerID {
 		t.Fatal("replay viewer mismatch")
+	}
+	if !replay.Credential.Connectable || replay.Credential.Provider != "pion" {
+		t.Fatal("replay credential is not connectable")
 	}
 	second := doWatch(t, base, operator, deviceID, ticket, "desk", "w2")
 	if second.ViewerID == first.ViewerID || second.SessionID != first.SessionID {
@@ -78,6 +83,9 @@ func TestP2ControlPlane(t *testing.T) {
 	var resourceID string
 	if err := db.QueryRow(`SELECT provider_resource_id FROM rtc_media_resource WHERE tenant_id = 'dev' AND session_id = ?`, first.SessionID).Scan(&resourceID); err != nil {
 		t.Fatal(err)
+	}
+	if resourceID == "" || resourceID != first.Credential.ResourceID || !strings.HasPrefix(resourceID, "pion-") {
+		t.Fatalf("media resource %s", resourceID)
 	}
 	sharedID := "s" + deviceID
 	if _, err := db.Exec(`
@@ -264,11 +272,172 @@ func TestP2ControlPlane(t *testing.T) {
 	}
 	putPlan(t, hook, secrets, unknownDevice, "status", "success")
 	waitSession(t, base, operator, unknownWatch.SessionID, func(view sessionView) bool { return view.Status == "CLOSED" })
+	if postSDP(t, unknownWatch.Credential.WHEPURL, unknownWatch.Credential.Token, "v=0\r\n") != http.StatusNotFound {
+		t.Fatal("closed session left the room")
+	}
+
+	brokenDevice := newDevice(t, base, admin)
+	brokenTicket := issueTicket(t, base, admin, brokenDevice)
+	secrets = append(secrets, brokenTicket)
+	grant(t, base, admin, brokenDevice, "operator", "view")
+	broken := doWatch(t, base, operator, brokenDevice, brokenTicket, "phone", "b1")
+	postEvent(t, hook, secrets, broken.SessionID, broken.Generation, "media.track_published", "device:"+brokenDevice)
+	waitSession(t, base, operator, broken.SessionID, func(view sessionView) bool {
+		return view.Status == "ACTIVE" && view.MediaReady
+	})
+	postEvent(t, hook, secrets, broken.SessionID, broken.Generation, "media.track_unpublished", "device:"+brokenDevice)
+	waitSession(t, base, operator, broken.SessionID, func(view sessionView) bool {
+		return view.Status == "FAILED" && !view.MediaReady
+	})
+	getJSON(t, base+"/api/v1/devices/"+brokenDevice+"/status", operator, &presence)
+	if presence["track_ready"] != false {
+		t.Fatal("unpublished track left the device occupied")
+	}
+	if postSDP(t, broken.Credential.WHEPURL, broken.Credential.Token, "v=0\r\n") != http.StatusNotFound {
+		t.Fatal("unpublished track left the room")
+	}
+	replaced := doWatch(t, base, operator, brokenDevice, brokenTicket, "phone", "b2")
+	if replaced.SessionID == broken.SessionID || replaced.Generation <= broken.Generation {
+		t.Fatal("unpublished track did not release the device")
+	}
+	postEvent(t, hook, secrets, replaced.SessionID, replaced.Generation, "media.track_published", "device:"+brokenDevice)
+	waitSession(t, base, operator, replaced.SessionID, func(view sessionView) bool { return view.Status == "ACTIVE" && view.MediaReady })
+	postEvent(t, hook, secrets, replaced.SessionID, broken.Generation, "media.room_closed", "device:"+brokenDevice)
+	postEvent(t, hook, secrets, replaced.SessionID, broken.Generation, "media.track_unpublished", "device:"+brokenDevice)
+	if got := getSession(t, base, operator, replaced.SessionID); got.Status != "ACTIVE" || !got.MediaReady || got.Generation != replaced.Generation {
+		t.Fatalf("old media loss changed the current session: status=%s media=%t generation=%d", got.Status, got.MediaReady, got.Generation)
+	}
+	if postSDP(t, replaced.Credential.WHEPURL, replaced.Credential.Token, "v=0\r\n") == http.StatusNotFound {
+		t.Fatal("old media loss removed the current room")
+	}
+	postEvent(t, hook, secrets, replaced.SessionID, replaced.Generation, "media.room_closed", "device:"+brokenDevice)
+	waitSession(t, base, operator, replaced.SessionID, func(view sessionView) bool {
+		return view.Status == "FAILED" && !view.MediaReady
+	})
+	if postSDP(t, replaced.Credential.WHEPURL, replaced.Credential.Token, "v=0\r\n") != http.StatusNotFound {
+		t.Fatal("closed room stayed reachable")
+	}
+	if again := doWatch(t, base, operator, brokenDevice, brokenTicket, "phone", "b3"); again.Generation <= replaced.Generation {
+		t.Fatal("room close did not release the device")
+	}
+
+	lostDevice := newDevice(t, base, admin)
+	lostTicket := issueTicket(t, base, admin, lostDevice)
+	secrets = append(secrets, lostTicket)
+	grant(t, base, admin, lostDevice, "operator", "call")
+	lost := doCall(t, base, admin, lostDevice, lostTicket)
+	if postJSON(t, base+"/api/v1/calls/"+lost.CallID+"/accept", operator, map[string]any{}, nil) != http.StatusOK {
+		t.Fatal("answerer could not accept the interrupted call")
+	}
+	postEvent(t, hook, secrets, lost.SessionID, lost.Generation, "call.connected", lost.CallID)
+	waitCall(t, base, operator, lost.CallID, "CONNECTED")
+	postEvent(t, hook, secrets, lost.SessionID, lost.Generation, "media.room_closed", "device:"+lostDevice)
+	waitCall(t, base, operator, lost.CallID, "ENDED")
+	waitSession(t, base, admin, lost.SessionID, func(view sessionView) bool { return view.Status == "FAILED" })
+	restarted := doCall(t, base, admin, lostDevice, lostTicket)
+	if restarted.CallID == lost.CallID {
+		t.Fatal("room close did not release the call")
+	}
+
+	// 请求路径先握住设备锁，再改观看者。并发加入、退出和全局回收要在这把锁后面排好，不能互相卡住。
+	staggerDevice := newDevice(t, base, admin)
+	staggerTicket := issueTicket(t, base, admin, staggerDevice)
+	secrets = append(secrets, staggerTicket)
+	grant(t, base, admin, staggerDevice, "operator", "view")
+	stagger := doWatch(t, base, operator, staggerDevice, staggerTicket, "phone", "s0")
+	postEvent(t, hook, secrets, stagger.SessionID, stagger.Generation, "media.track_published", "device:"+staggerDevice)
+	waitSession(t, base, operator, stagger.SessionID, func(view sessionView) bool {
+		return view.Status == "ACTIVE" && view.MediaReady
+	})
+	if _, err := db.Exec(`UPDATE rtc_viewer SET heartbeat_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR) WHERE tenant_id = 'dev' AND viewer_id = ?`, stagger.ViewerID); err != nil {
+		t.Fatal(err)
+	}
+	hold, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var locked int
+	if err := hold.QueryRow(`SELECT 1 FROM device WHERE tenant_id = 'dev' AND device_id = ? FOR UPDATE`, staggerDevice).Scan(&locked); err != nil {
+		_ = hold.Rollback()
+		t.Fatal(err)
+	}
+	joined := make([]watchResult, 4)
+	var staggerGroup sync.WaitGroup
+	staggerGroup.Add(len(joined) + 1)
+	for i := range joined {
+		go func(i int) {
+			defer staggerGroup.Done()
+			joined[i] = doWatch(t, base, operator, staggerDevice, staggerTicket, fmt.Sprintf("s%d", i+1), fmt.Sprintf("sk%d", i+1))
+		}(i)
+	}
+	go func() {
+		defer staggerGroup.Done()
+		leave(t, base, operator, stagger.ViewerID)
+	}()
+	time.Sleep(2 * time.Second)
+	touchCtx, touchCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, touchErr := hold.ExecContext(touchCtx, `UPDATE rtc_viewer SET heartbeat_at = UTC_TIMESTAMP(3) WHERE tenant_id = 'dev' AND viewer_id = ?`, stagger.ViewerID)
+	touchCancel()
+	var commitErr error
+	if touchErr != nil {
+		_ = hold.Rollback()
+	} else {
+		commitErr = hold.Commit()
+	}
+	staggerGroup.Wait()
+	if touchErr != nil {
+		t.Fatal(touchErr)
+	}
+	if commitErr != nil {
+		t.Fatal(commitErr)
+	}
+	for i := range joined {
+		if joined[i].SessionID != joined[0].SessionID {
+			t.Fatalf("concurrent join created another session")
+		}
+		if postJSON(t, base+"/api/v1/viewers/"+joined[i].ViewerID+"/heartbeat", operator, map[string]any{}, nil) != http.StatusOK {
+			t.Fatal("joined viewer heartbeat failed")
+		}
+	}
+	waitSession(t, base, operator, joined[0].SessionID, func(view sessionView) bool { return view.Status == "ACTIVE" })
+	for i := range joined {
+		if postJSON(t, base+"/api/v1/viewers/"+joined[i].ViewerID+"/heartbeat", operator, map[string]any{}, nil) != http.StatusOK {
+			t.Fatal("joined viewer heartbeat failed")
+		}
+	}
+	time.Sleep(1300 * time.Millisecond)
+	if got := getSession(t, base, operator, joined[0].SessionID); got.Status != "ACTIVE" || got.Generation != joined[0].Generation {
+		t.Fatalf("stop counted a live join as gone: status=%s generation=%d", got.Status, got.Generation)
+	}
+	var sessionStatus, viewerStatus string
+	if err := db.QueryRow(`
+		SELECT s.status, v.status FROM rtc_viewer v
+		JOIN rtc_session s ON s.tenant_id = v.tenant_id AND s.session_id = v.session_id
+		WHERE v.tenant_id = 'dev' AND v.viewer_id = ?`, joined[0].ViewerID).Scan(&sessionStatus, &viewerStatus); err != nil {
+		t.Fatal(err)
+	}
+	if sessionStatus != "ACTIVE" || (viewerStatus != "JOINING" && viewerStatus != "ACTIVE") {
+		t.Fatalf("joiner landed on session=%s viewer=%s", sessionStatus, viewerStatus)
+	}
+	var liveSessions int
+	if err := db.QueryRow(`
+		SELECT COUNT(*) FROM rtc_session
+		WHERE tenant_id = 'dev' AND device_id = ? AND status NOT IN ('CLOSED', 'FAILED')`, staggerDevice).Scan(&liveSessions); err != nil || liveSessions != 1 {
+		t.Fatalf("live sessions = %d", liveSessions)
+	}
+	var staleStatus string
+	if err := db.QueryRow(`SELECT status FROM rtc_viewer WHERE tenant_id = 'dev' AND viewer_id = ?`, stagger.ViewerID).Scan(&staleStatus); err != nil {
+		t.Fatal(err)
+	}
+	if staleStatus == "JOINING" || staleStatus == "ACTIVE" {
+		t.Fatalf("stale viewer still occupies as %s", staleStatus)
+	}
 
 	log2 := filepath.Join(t.TempDir(), "server-2.log")
 	stop2 := startServer(t, bin, log2, map[string]string{
 		"IOT_HTTP_ADDR":            "127.0.0.1:18081",
 		"IOT_HOOK_ADDR":            "",
+		"IOT_SFU_ADDR":             "",
 		"IOT_ENABLE_TEST_CONTROLS": "0",
 		"IOT_INSTANCE_ID":          "iot-dev-2",
 		"IOT_STOP_DELAY":           "1s",
@@ -321,6 +490,8 @@ type watchResult struct {
 		Provider    string `json:"provider"`
 		Connectable bool   `json:"connectable"`
 		Token       string `json:"token"`
+		ResourceID  string `json:"resource_id"`
+		WHEPURL     string `json:"whep_url"`
 	} `json:"credential"`
 }
 
@@ -365,6 +536,24 @@ func ticketFrom(t *testing.T, body map[string]any) string {
 		t.Fatal("ticket missing")
 	}
 	return ticket
+}
+
+func postSDP(t *testing.T, raw, token, sdp string) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, raw, strings.NewReader(sdp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/sdp")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode
 }
 
 func watchBody(ticket, clientID, key string) map[string]any {

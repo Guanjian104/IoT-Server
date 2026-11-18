@@ -129,6 +129,29 @@ func TestHookListenerIsSeparate(t *testing.T) {
 	}
 }
 
+func TestSFUAddrStaysLocal(t *testing.T) {
+	cfg, err := Load(func(key string) (string, bool) {
+		if key == "IOT_SFU_ADDR" {
+			return "127.0.0.1:18090", true
+		}
+		return "", false
+	})
+	if err != nil || cfg.SFUAddr != "127.0.0.1:18090" {
+		t.Fatalf("sfu = %s err = %v", cfg.SFUAddr, err)
+	}
+	for _, addr := range []string{"127.0.0.1:8080", "10.0.0.8:18090", "bad"} {
+		_, err = Load(func(key string) (string, bool) {
+			if key == "IOT_SFU_ADDR" {
+				return addr, true
+			}
+			return "", false
+		})
+		if err == nil || err.Error() != "invalid IOT_SFU_ADDR" {
+			t.Fatalf("addr %s error = %v", addr, err)
+		}
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.env")

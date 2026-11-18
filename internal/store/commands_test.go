@@ -35,6 +35,19 @@ func TestCommandDispositionExitsEveryOpenState(t *testing.T) {
 	}
 }
 
+func TestCommandBlocksDeviceUntilItFinishes(t *testing.T) {
+	for _, state := range []string{"sending", "sent", "uncertain", "needs_attention"} {
+		if !commandBlocksDevice(state) {
+			t.Fatalf("%s does not block the device", state)
+		}
+	}
+	for _, state := range []string{"pending", "accepted", "failed", "timeout", "cancelled"} {
+		if commandBlocksDevice(state) {
+			t.Fatalf("%s still blocks the device", state)
+		}
+	}
+}
+
 func TestScreenSendRechecksDevice(t *testing.T) {
 	if got := screenSend(false, true, true, false); got != "send" {
 		t.Fatalf("open device = %s", got)

@@ -1,4 +1,4 @@
-// Package emqx 调用本机 Dashboard API 断开客户端。
+// Package emqx 调用本机 Dashboard API 查询和断开客户端。
 package emqx
 
 import (
@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -62,6 +64,141 @@ func (c *Client) Kick(ctx context.Context, clientID string) error {
 		return nil
 	}
 	return errors.New("kick failed")
+}
+
+// ConnectedDevices 返回当前仍连接的客户端及其连接时间（毫秒）。
+// 第二个结果表示分页已经扫完。调用失败时不返回残缺列表。
+func (c *Client) ConnectedDevices(ctx context.Context) (map[string]int64, bool, error) {
+	if c == nil || c.baseURL == "" {
+		return nil, false, errors.New("clients failed")
+	}
+	token, err := c.bearer(ctx, false)
+	if err != nil {
+		return nil, false, errors.New("clients failed")
+	}
+	online := map[string]int64{}
+	for page := 1; page <= 100; page++ {
+		status, rows, hasNext, err := c.clientsPage(ctx, token, page)
+		if err != nil {
+			return nil, false, errors.New("clients failed")
+		}
+		if status == http.StatusUnauthorized && page == 1 {
+			token, err = c.bearer(ctx, true)
+			if err != nil {
+				return nil, false, errors.New("clients failed")
+			}
+			status, rows, hasNext, err = c.clientsPage(ctx, token, page)
+			if err != nil {
+				return nil, false, errors.New("clients failed")
+			}
+		}
+		if status != http.StatusOK {
+			return nil, false, errors.New("clients failed")
+		}
+		for _, row := range rows {
+			if row.clientID == "" || !row.connected {
+				continue
+			}
+			online[row.clientID] = row.connectedAt
+		}
+		if !hasNext {
+			return online, true, nil
+		}
+	}
+	return online, false, nil
+}
+
+type clientRow struct {
+	clientID    string
+	connected   bool
+	connectedAt int64
+}
+
+func (c *Client) clientsPage(ctx context.Context, token string, page int) (int, []clientRow, bool, error) {
+	endpoint, err := url.Parse(c.baseURL + "/api/v5/clients")
+	if err != nil {
+		return 0, nil, false, err
+	}
+	query := endpoint.Query()
+	query.Set("page", strconv.Itoa(page))
+	query.Set("limit", "100")
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, nil, false, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, nil, false, err
+	}
+	var pageBody struct {
+		Data []struct {
+			ClientID    string          `json:"clientid"`
+			Connected   bool            `json:"connected"`
+			ConnState   string          `json:"conn_state"`
+			ConnectedAt json.RawMessage `json:"connected_at"`
+		} `json:"data"`
+		Meta *struct {
+			HasNext bool `json:"hasnext"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal(body, &pageBody); err != nil || pageBody.Meta == nil {
+		return 0, nil, false, errors.New("clients failed")
+	}
+	rows := make([]clientRow, 0, len(pageBody.Data))
+	for _, item := range pageBody.Data {
+		rows = append(rows, clientRow{
+			clientID:    item.ClientID,
+			connected:   item.Connected || item.ConnState == "connected",
+			connectedAt: connectedMillis(item.ConnectedAt),
+		})
+	}
+	return resp.StatusCode, rows, pageBody.Meta.HasNext, nil
+}
+
+func connectedMillis(raw json.RawMessage) int64 {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return 0
+	}
+	if raw[0] == '"' {
+		var text string
+		if json.Unmarshal(raw, &text) != nil {
+			return 0
+		}
+		if n, err := strconv.ParseInt(text, 10, 64); err == nil {
+			return scaleUnix(n)
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, text); err == nil {
+			return parsed.UnixMilli()
+		}
+		return 0
+	}
+	var n int64
+	if json.Unmarshal(raw, &n) != nil {
+		var f float64
+		if json.Unmarshal(raw, &f) != nil {
+			return 0
+		}
+		n = int64(f)
+	}
+	return scaleUnix(n)
+}
+
+func scaleUnix(n int64) int64 {
+	if n > 0 && n < 1_000_000_000_000 {
+		return n * 1000
+	}
+	return n
 }
 
 func (c *Client) delete(ctx context.Context, clientID, token string) (int, error) {
