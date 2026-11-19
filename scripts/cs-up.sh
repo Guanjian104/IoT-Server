@@ -6,7 +6,9 @@ sh scripts/cs-env.sh
 sh scripts/render-emqx.sh
 # 容器里的 emqx 用户是 1000。root 的 600 文件在 Linux 上会变成 eacces。
 chown 1000:1000 deployments/local/emqx.conf deployments/local/vm.args
-chmod 400 deployments/local/emqx.conf deployments/local/vm.args
+chmod 400 deployments/local/emqx.conf
+# EMQX 会把 vm.args 原样复制到数据目录再追加。源文件只有读权限时，复制结果也不能写。
+chmod 600 deployments/local/vm.args
 chmod 711 deployments/local
 # Docker 新建的数据卷属主是 root，EMQX 以 1000 运行时写不了。
 docker volume create eco-device-emqx >/dev/null
