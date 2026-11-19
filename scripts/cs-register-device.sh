@@ -6,7 +6,7 @@ device_id=${1:?device id}
 topic_model=${2:-}
 printf '%s\n' "$device_id" | grep -Eq '^[0-9a-f]{12}$'
 case "$topic_model" in
-  ""|1_0pro|2_0_test) ;;
+  ""|1_0pro|2_0_test|watch) ;;
   *) echo "invalid topic model" >&2; exit 1 ;;
 esac
 if [ ! -f .env ]; then

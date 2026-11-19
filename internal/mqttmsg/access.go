@@ -59,13 +59,17 @@ func ServiceClientID(instance string) string {
 const (
 	Model10Pro  = "1_0pro"
 	Model20Test = "2_0_test"
+	ModelWatch  = "watch"
 )
 
-var businessTopic = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test)/([0-9a-f]{12})/(cmd|state)$`)
+var (
+	businessTopic = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test)/([0-9a-f]{12})/(cmd|state)$`)
+	watchState    = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test)/([0-9a-f]{12}|\+)/state$`)
+)
 
-// KnownModel 判断主题代次是否已接入。
+// KnownModel 判断主题代次是否已接入。watch 只用来订阅状态，不对应设备报文。
 func KnownModel(model string) bool {
-	return model == Model10Pro || model == Model20Test
+	return model == Model10Pro || model == Model20Test || model == ModelWatch
 }
 
 // SplitTopic 解析项圈业务主题。kind 为 cmd 或 state。
@@ -90,7 +94,7 @@ func DeviceTopic(deviceID, kind string) string {
 
 // Topic 按设备登记的代次拼出业务主题。
 func Topic(model, deviceID, kind string) string {
-	if !KnownModel(model) || !ValidDeviceID(deviceID) {
+	if (model != Model10Pro && model != Model20Test) || !ValidDeviceID(deviceID) {
 		return ""
 	}
 	switch kind {
@@ -116,7 +120,13 @@ func Decide(kind, deviceID, model, action, topic string) string {
 }
 
 func decideDevice(deviceID, model, action, topic string) string {
-	if deviceID == "" || !KnownModel(model) || strings.ContainsAny(topic, "#+") {
+	if deviceID == "" || !KnownModel(model) {
+		return "deny"
+	}
+	if model == ModelWatch {
+		return decideWatch(action, topic)
+	}
+	if strings.ContainsAny(topic, "#+") {
 		return "deny"
 	}
 	switch action {
@@ -134,6 +144,17 @@ func decideDevice(deviceID, model, action, topic string) string {
 	default:
 		return "deny"
 	}
+}
+
+// decideWatch 允许观察连接订阅状态原文。不能发布，也不能订控制指令。
+func decideWatch(action, topic string) string {
+	if action != "subscribe" || strings.Contains(topic, "#") {
+		return "deny"
+	}
+	if watchState.MatchString(topic) {
+		return "allow"
+	}
+	return "deny"
 }
 
 func decideService(action, topic string) string {
