@@ -3,6 +3,22 @@
 set -eu
 cd "$(dirname "$0")/.."
 sh scripts/cs-env.sh
+# EMQX 在容器里通过 docker0 访问宿主机。钩子只听 127.0.0.1 时，认证请求会被拒绝。
+gateway=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+case "$gateway" in
+  10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) ;;
+  *) echo "docker bridge gateway is not private" >&2; exit 1 ;;
+esac
+tmp=$(mktemp)
+awk -v addr="${gateway}:18094" '
+  BEGIN { done = 0 }
+  /^IOT_HOOK_ADDR=/ { print "IOT_HOOK_ADDR=" addr; done = 1; next }
+  { print }
+  END { if (!done) print "IOT_HOOK_ADDR=" addr }
+' .env > "$tmp"
+cat "$tmp" > .env
+rm -f "$tmp"
+chmod 600 .env
 sh scripts/render-emqx.sh
 # 容器里的 emqx 用户是 1000。root 的 600 文件在 Linux 上会变成 eacces。
 chown 1000:1000 deployments/local/emqx.conf deployments/local/vm.args
