@@ -1,0 +1,142 @@
+name: eco-device
+
+services:
+  mysql:
+    image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    container_name: eco-device-mysql
+    mem_limit: 1024m
+    memswap_limit: 1024m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${IOT_MYSQL_ROOT_PASSWORD:?set IOT_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: iot_dev
+      MYSQL_USER: iot_app
+      MYSQL_PASSWORD: ${IOT_MYSQL_PASSWORD:?set IOT_MYSQL_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+    ports:
+      - "127.0.0.1:13316:3306"
+    volumes:
+      - eco-device-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uiot_app -p\"$$MYSQL_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    networks: [eco-device]
+
+  redis:
+    image: redis:8.10.3@sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53
+    container_name: eco-device-redis
+    mem_limit: 256m
+    memswap_limit: 256m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+    environment:
+      IOT_REDIS_PASSWORD: ${IOT_REDIS_PASSWORD:?set IOT_REDIS_PASSWORD}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 200mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${IOT_REDIS_PASSWORD:?set IOT_REDIS_PASSWORD}
+    ports:
+      - "127.0.0.1:16380:6379"
+    volumes:
+      - eco-device-redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$IOT_REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [eco-device]
+
+  emqx:
+    image: emqx/emqx:6.3.3@sha256:54778dba62a5cbcb03ca381c9bceb3d8a87cab9e3da155ed3607d994454df900
+    container_name: eco-device-emqx
+    mem_limit: 512m
+    memswap_limit: 512m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+    environment:
+      EMQX_FEATURES: dashboard
+      EMQX_SECURITY_PROFILE: hardened
+      EMQX_NODE__COOKIE: ${EMQX_NODE_COOKIE:?set EMQX_NODE_COOKIE}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DEV_DASHBOARD_PASSWORD:?set EMQX_DEV_DASHBOARD_PASSWORD}
+    ports:
+      - "0.0.0.0:11884:1883"
+      - "127.0.0.1:18083:18083"
+    volumes:
+      - eco-device-emqx:/opt/emqx/data
+      - ./local/emqx.conf:/opt/emqx/etc/emqx.conf:ro
+      - ./local/vm.args:/opt/emqx/etc/vm.args:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18083/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [eco-device]
+
+  server:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      args:
+        VERSION: ${IOT_BUILD_VERSION:-cs}
+        REVISION: ${IOT_BUILD_REVISION:-none}
+    image: eco-device-server:cs
+    container_name: eco-device-server
+    network_mode: host
+    mem_limit: 256m
+    memswap_limit: 256m
+    restart: unless-stopped
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+    env_file: ../.env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+
+networks:
+  eco-device:
+    name: eco-device
+
+volumes:
+  eco-device-mysql:
+    name: eco-device-mysql
+  eco-device-redis:
+    name: eco-device-redis
+  eco-device-emqx:
+    name: eco-device-emqx
