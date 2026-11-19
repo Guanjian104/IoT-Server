@@ -12,10 +12,11 @@ chmod 600 deployments/local/vm.args
 chmod 711 deployments/local
 # Docker 新建的数据卷属主是 root，EMQX 以 1000 运行时写不了。
 docker volume create eco-device-emqx >/dev/null
-docker run --rm --user root --entrypoint chown \
+docker stop eco-device-emqx >/dev/null 2>&1 || true
+docker run --rm --user root --entrypoint sh \
   -v eco-device-emqx:/opt/emqx/data \
   docker.m.daocloud.io/emqx/emqx:6.3.3 \
-  -R 1000:1000 /opt/emqx/data
+  -c 'chown -R 1000:1000 /opt/emqx/data && chmod -R u+rwX /opt/emqx/data'
 export IOT_BUILD_VERSION=cs
 export IOT_BUILD_REVISION=$(git -c safe.directory="$PWD" rev-parse --short HEAD)
 docker compose --env-file .env -p eco-device -f deployments/compose.cs.yaml up -d --build
