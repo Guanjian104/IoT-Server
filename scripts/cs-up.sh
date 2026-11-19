@@ -4,6 +4,10 @@ set -eu
 cd "$(dirname "$0")/.."
 sh scripts/cs-env.sh
 sh scripts/render-emqx.sh
+# 容器里的 emqx 用户是 1000。root 的 600 文件在 Linux 上会变成 eacces。
+chown 1000:1000 deployments/local/emqx.conf deployments/local/vm.args
+chmod 400 deployments/local/emqx.conf deployments/local/vm.args
+chmod 711 deployments/local
 export IOT_BUILD_VERSION=cs
 export IOT_BUILD_REVISION=$(git -c safe.directory="$PWD" rev-parse --short HEAD)
 docker compose --env-file .env -p eco-device -f deployments/compose.cs.yaml up -d --build
