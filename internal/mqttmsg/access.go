@@ -67,7 +67,7 @@ var (
 	watchState    = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test|\+)/([0-9a-f]{12}|\+)/state$`)
 )
 
-// KnownModel 判断主题代次是否已接入。watch 只用来订阅状态，不对应设备报文。
+// KnownModel 判断主题代次是否已接入。watch 不对应设备报文。
 func KnownModel(model string) bool {
 	return model == Model10Pro || model == Model20Test || model == ModelWatch
 }
@@ -146,13 +146,21 @@ func decideDevice(deviceID, model, action, topic string) string {
 	}
 }
 
-// decideWatch 允许观察连接订阅状态原文。不能发布，也不能订控制指令。
+// decideWatch 允许观察连接订阅状态原文，并向具体设备的 cmd 发布指令。
+// 不能订阅控制指令，也不能使用 #。
 func decideWatch(action, topic string) string {
-	if action != "subscribe" || strings.Contains(topic, "#") {
+	if strings.Contains(topic, "#") {
 		return "deny"
 	}
-	if watchState.MatchString(topic) {
-		return "allow"
+	switch action {
+	case "subscribe":
+		if watchState.MatchString(topic) {
+			return "allow"
+		}
+	case "publish":
+		if _, _, kind, err := SplitTopic(topic); err == nil && kind == "cmd" {
+			return "allow"
+		}
 	}
 	return "deny"
 }
