@@ -64,7 +64,7 @@ const (
 
 var (
 	businessTopic = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test)/([0-9a-f]{12})/(cmd|state)$`)
-	watchState    = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test)/([0-9a-f]{12}|\+)/state$`)
+	watchState    = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test|\+)/([0-9a-f]{12}|\+)/state$`)
 )
 
 // KnownModel 判断主题代次是否已接入。watch 只用来订阅状态，不对应设备报文。
