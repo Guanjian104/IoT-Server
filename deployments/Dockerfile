@@ -2,6 +2,8 @@ FROM docker.m.daocloud.io/library/golang:1.27.3-bookworm@sha256:dc0963f32053e4bc
 
 WORKDIR /src
 COPY go.mod go.sum ./
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.google.cn
 RUN go mod download
 COPY . .
 
