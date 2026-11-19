@@ -1,8 +1,8 @@
 # ECO-Device-Server
 
-本地 IoT 进程，Go 模块名是 `iot-server`。它服务当前中控固件：设备登记、权限、MQTT 属性与开关命令，以及观看和通话的控制平面。配上 `IOT_SFU_ADDR` 时，同一进程在本机转发音视频。
+本地 IoT 进程，Go 模块名是 `iot-server`。它服务项圈 1.0pro：设备登记、权限、MQTT 命令和状态，以及观看和通话的控制平面。配上 `IOT_SFU_ADDR` 时，同一进程在本机转发音视频。
 
-仓库使用 Go 1.27.3，并且 `GOTOOLCHAIN=local`。固件报文见 `docs/MQTT后端对接文档.md`。控制平面的请求体和错误码见 `docs/控制平面请求集.md`。
+仓库使用 Go 1.27.3，并且 `GOTOOLCHAIN=local`。MQTT 主题和报文见 `docs/MQTT_IOT_PROTOCOL.md`。控制平面的请求体和错误码见 `docs/控制平面请求集.md`。
 
 ## 两种启动形态
 
@@ -18,16 +18,16 @@
 
 平台管理员可以登记设备、改授权、启用、禁用和吊销。普通用户按设备持有 `manage`、`view`、`call`、`ticket`。`manage` 覆盖读取和发令；`view` 可以读设备和会话。登录每用户名每分钟 20 次，发令每用户每分钟 30 次，计数在 Redis。Redis 失败时这两类请求返回 503。
 
-设备编号是 12 位小写十六进制。当前固件功能点是温湿度，以及照明、雾化、通风、喂食、加热垫、晒背灯六路布尔开关。命令只接受这些开关。上报、下发和应答的报文字段见 `docs/MQTT后端对接文档.md`。命令先入库再发布，状态有 `pending`、`sending`、`sent`、`accepted`、`failed`、`timeout`、`uncertain`、`needs_attention`、`cancelled`。`accepted` 表示收到设备成功回执。`uncertain` 和 `needs_attention` 可以人工重试或关闭；关闭收成 `failed`。
+设备编号是 12 位小写十六进制，取项圈 MAC。私有服主题是 `pet/collar/1_0pro/{mac}/cmd` 和 `pet/collar/1_0pro/{mac}/state`。下发命令没有 `msgId`，命令名是 `find_light`、`buzzer`、`gps_oneshot`、`find_mode`、`trip_track`、`activate`、`mic_record`、`speaker_play`、`voice_call`。设备在 `state` 上回复 `cmd_result`，并上报 `location`、`mode_state`、DP，以及纯文本 `online` / `offline`。命令先入库再发布，状态有 `pending`、`sending`、`sent`、`accepted`、`failed`、`timeout`、`uncertain`、`needs_attention`、`cancelled`。`accepted` 表示收到 `accepted`、`success` 或 `ended`。`failed` 和 `busy` 收成 `failed`。`uncertain` 和 `needs_attention` 可以人工重试或关闭；关闭收成 `failed`。
 
 设备 MQTT 使用共享用户名 `root`，客户端 ID 等于设备编号，口令来自 `IOT_MQTT_DEVICE_PASSWORD`。服务账号用户名固定为 `iot-dev-service`。用户名以 `app:` 开头的连接会被拒绝。
 
 | 角色 | 允许的主题 |
 |---|---|
-| 设备 | 发布自己的 `device/{id}/property/report`、`set_reply`、`status`；订阅自己的 `device/{id}/property/set` |
-| 服务 | 发布 `device/{id}/property/set`；共享订阅上报、回执、状态，并订阅 `$SYS` 连接事件 |
+| 设备 | 发布自己的 `pet/collar/1_0pro/{mac}/state`；订阅自己的 `pet/collar/1_0pro/{mac}/cmd` |
+| 服务 | 发布 `pet/collar/1_0pro/{mac}/cmd`；共享订阅 `state`，并订阅 `$SYS` 连接事件 |
 
-钩子在独立监听上校验认证和 ACL。禁用或吊销后，进程调用 EMQX 管理接口断开该客户端。上报按租户、设备、`msgId` 和载荷摘要去重。服务连接使用持久会话：消息写入 MySQL 后才确认，未确认的消息可从 `mqtt_inbox` 恢复。入站队列上限 256 条。依赖短时不可用时，已收到的消息留在队头按顺序重试，服务连接保持重连。
+钩子在独立监听上校验认证和 ACL。禁用或吊销后，进程调用 EMQX 管理接口断开该客户端。上报按租户、设备、载荷摘要去重。服务连接使用持久会话：消息写入 MySQL 后才确认，未确认的消息可从 `mqtt_inbox` 恢复。入站队列上限 256 条。依赖短时不可用时，已收到的消息留在队头按顺序重试，服务连接保持重连。
 
 ## 观看、通话和本机 SFU
 

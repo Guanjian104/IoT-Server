@@ -1,8 +1,8 @@
-// Package mqttmsg 实现当前中控固件的 MQTT 报文、主题和访问判定。
-// 这里不连接 Broker，也不保存业务状态。
+// Package mqttmsg 实现项圈 1.0pro 的 MQTT 报文、主题和访问判定。
+// 这里不连接 Broker，也不保存业务状态。主题和字段以 docs/MQTT_IOT_PROTOCOL.md 的私有服为准。
 package mqttmsg
 
-// Point 是协议文档里的一个功能点。中文名必须与固件屏幕上的名字一致。
+// Point 是登记到设备上的一条命令。中文名与协议里的功能说明一致。
 type Point struct {
 	Identifier string
 	Name       string
@@ -10,33 +10,23 @@ type Point struct {
 	Writable   bool
 }
 
-const SensorID = "temp_humidity_sens_2"
-
-// Points 是当前固件的全部功能点。标识符和中文名一一对应，最多 6 路开关。
+// Points 是私有服当前会下发的全部命令。
 var Points = []Point{
-	{Identifier: SensorID, Name: "温湿度", DataType: "string", Writable: false},
-	{Identifier: "switch_light", Name: "照明", DataType: "bool", Writable: true},
-	{Identifier: "switch_mist", Name: "雾化", DataType: "bool", Writable: true},
-	{Identifier: "switch_fan", Name: "通风", DataType: "bool", Writable: true},
-	{Identifier: "switch_feed", Name: "喂食", DataType: "bool", Writable: true},
-	{Identifier: "switch_heat", Name: "加热垫", DataType: "bool", Writable: true},
-	{Identifier: "switch_bask", Name: "晒背灯", DataType: "bool", Writable: true},
+	{Identifier: "find_light", Name: "寻宠闪灯", DataType: "command", Writable: true},
+	{Identifier: "buzzer", Name: "寻宠响铃", DataType: "command", Writable: true},
+	{Identifier: "gps_oneshot", Name: "立即定位", DataType: "command", Writable: true},
+	{Identifier: "find_mode", Name: "寻宠模式", DataType: "command", Writable: true},
+	{Identifier: "trip_track", Name: "出行轨迹", DataType: "command", Writable: true},
+	{Identifier: "activate", Name: "激活", DataType: "command", Writable: true},
+	{Identifier: "mic_record", Name: "录音", DataType: "command", Writable: true},
+	{Identifier: "speaker_play", Name: "播放预设音", DataType: "command", Writable: true},
+	{Identifier: "voice_call", Name: "语音通话", DataType: "command", Writable: true},
 }
 
-// IsSwitch 报告这个标识符是不是可下发的开关。
-func IsSwitch(identifier string) bool {
+// KnownCommand 报告这个名字是不是协议里的 cmd。
+func KnownCommand(cmd string) bool {
 	for _, point := range Points {
-		if point.Identifier == identifier {
-			return point.Writable
-		}
-	}
-	return false
-}
-
-// Known 报告这个标识符是否属于当前固件。
-func Known(identifier string) bool {
-	for _, point := range Points {
-		if point.Identifier == identifier {
+		if point.Identifier == cmd {
 			return true
 		}
 	}

@@ -9,7 +9,7 @@ import (
 	"iot-server/internal/mqttmsg"
 )
 
-// Device 是租户内的一台中控。
+// Device 是租户内的一台设备。
 type Device struct {
 	DeviceID string
 	Product  string

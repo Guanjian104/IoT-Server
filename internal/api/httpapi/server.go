@@ -269,14 +269,19 @@ func (s *Server) createCommand(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Identifier string `json:"identifier"`
-			Value      *bool  `json:"value"`
+			Cmd    string          `json:"cmd"`
+			On     *bool           `json:"on"`
+			Params json.RawMessage `json:"params"`
 		}
-		if !decode(w, r, &body) || body.Value == nil || !mqttmsg.IsSwitch(body.Identifier) {
+		if !decode(w, r, &body) {
+			return
+		}
+		payload, err := mqttmsg.CanonicalCommand(body.Cmd, body.On, body.Params)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid")
 			return
 		}
-		command, err := s.store.Enqueue(r.Context(), user.TenantID, device.DeviceID, body.Identifier, *body.Value, time.Now().Add(s.deadline))
+		command, err := s.store.Enqueue(r.Context(), user.TenantID, device.DeviceID, payload, time.Now().Add(s.deadline))
 		if errors.Is(err, store.ErrUnavailable) {
 			writeError(w, http.StatusServiceUnavailable, "unavailable")
 			return

@@ -24,7 +24,7 @@ fi
 code=$(curl -sS -o /dev/null -w '%{http_code}' \
   -H "Authorization: Bearer ${token}" \
   -H 'Content-Type: application/json' \
-  -d "{\"device_id\":\"${device_id}\",\"product_id\":\"controller\"}" \
+  -d "{\"device_id\":\"${device_id}\",\"product_id\":\"collar\"}" \
   http://127.0.0.1:18092/api/v1/devices)
 case "$code" in
   201|409) echo "device ${device_id} registered" ;;

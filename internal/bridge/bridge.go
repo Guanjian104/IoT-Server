@@ -314,50 +314,52 @@ func (b *Bridge) dispatch(topic string, payload []byte) error {
 		return b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "device")
 	}
 	switch kind {
-	case "report":
-		return b.ingestReport(deviceID, topic, payload)
-	case "reply":
-		return b.ingestReply(deviceID, topic, payload)
-	case "status":
-		status, err := mqttmsg.ParseStatus(topic, payload)
-		if err != nil {
-			b.note()
-			return b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "status")
-		}
-		b.note()
-		return b.store.SetReportedStatus(b.ctx, b.tenant, deviceID, status)
+	case "state":
+		return b.ingestState(deviceID, topic, payload)
 	default:
 		b.note()
 		return b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "topic")
 	}
 }
 
-func (b *Bridge) ingestReport(deviceID, topic string, payload []byte) error {
-	report, err := mqttmsg.ParseReport(topic, payload)
+func (b *Bridge) ingestState(deviceID, topic string, payload []byte) error {
+	message, err := mqttmsg.ParseState(topic, payload)
 	if err != nil {
 		b.note()
-		return b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "report")
+		return b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "state")
 	}
+	switch message.Kind {
+	case "status":
+		b.note()
+		return b.store.SetReportedStatus(b.ctx, b.tenant, deviceID, message.Status)
+	case "cmd_result":
+		return b.ingestReply(deviceID, message.Reply)
+	case "report":
+		return b.ingestReport(deviceID, message.Report, payload)
+	default:
+		b.note()
+		return b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "state")
+	}
+}
+
+func (b *Bridge) ingestReport(deviceID string, report mqttmsg.Report, payload []byte) error {
+	report.MsgID = mqttmsg.Hash(payload)
 	duplicate, err := b.store.IngestReport(b.ctx, b.tenant, report, payload)
 	if err != nil {
 		return err
 	}
 	b.note()
 	if b.log != nil {
-		b.log.Info("property report", "device_id", deviceID, "msg_id", report.MsgID, "duplicate", duplicate)
+		b.log.Info("device state", "device_id", deviceID, "duplicate", duplicate)
 	}
 	return nil
 }
 
-func (b *Bridge) ingestReply(deviceID, topic string, payload []byte) error {
-	reply, err := mqttmsg.ParseReply(topic, payload)
-	if err != nil {
-		b.note()
-		return b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "reply")
-	}
+func (b *Bridge) ingestReply(deviceID string, reply mqttmsg.CmdResult) error {
 	var result string
+	var err error
 	for i := 0; i < 10; i++ {
-		result, err = b.store.ApplyReply(b.ctx, b.tenant, deviceID, reply.MsgID, reply.Code)
+		result, err = b.store.ApplyReply(b.ctx, b.tenant, deviceID, reply.Cmd, reply.Result, reply.Code)
 		if err != nil {
 			return err
 		}
@@ -375,7 +377,7 @@ func (b *Bridge) ingestReply(deviceID, topic string, payload []byte) error {
 	}
 	b.note()
 	if b.log != nil {
-		b.log.Info("command reply", "device_id", deviceID, "msg_id", reply.MsgID, "result", result, "reply_code", reply.Code)
+		b.log.Info("command reply", "device_id", deviceID, "cmd", reply.Cmd, "result", result, "reply_code", reply.Code)
 	}
 	return nil
 }
@@ -471,8 +473,8 @@ func (b *Bridge) publishOne(item store.Outbound) {
 		_ = b.store.ConcludeSending(ctx, item.ID, "timeout")
 		return
 	}
-	// QoS 1 只保证至少送达一次，同一份载荷可能再来。设备按 msgId 只执行一次。
-	token := b.client.Publish(mqttmsg.DeviceTopic(item.DeviceID, "set"), 1, false, item.Payload)
+	// QoS 1 只保证至少送达一次。设备报文没有 msgId，相同载荷再次到达会被再执行。
+	token := b.client.Publish(mqttmsg.DeviceTopic(item.DeviceID, "cmd"), 1, false, item.Payload)
 	uncertain := !token.WaitTimeout(wait)
 	if uncertain || token.Error() != nil {
 		b.recordPublish(item, uncertain || token.Error() == nil, token.Error())

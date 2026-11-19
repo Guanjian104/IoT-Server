@@ -57,23 +57,17 @@ func ServiceClientID(instance string) string {
 }
 
 var (
-	reportTopic = regexp.MustCompile(`^device/([0-9a-f]{12})/property/report$`)
-	setTopic    = regexp.MustCompile(`^device/([0-9a-f]{12})/property/set$`)
-	replyTopic  = regexp.MustCompile(`^device/([0-9a-f]{12})/property/set_reply$`)
-	statusTopic = regexp.MustCompile(`^device/([0-9a-f]{12})/status$`)
+	cmdTopic   = regexp.MustCompile(`^pet/collar/1_0pro/([0-9a-f]{12})/cmd$`)
+	stateTopic = regexp.MustCompile(`^pet/collar/1_0pro/([0-9a-f]{12})/state$`)
 )
 
-// SplitTopic 解析设备业务主题。kind 为 report、set、reply 或 status。
+// SplitTopic 解析项圈业务主题。kind 为 cmd 或 state。
 func SplitTopic(topic string) (deviceID, kind string, err error) {
 	switch {
-	case reportTopic.MatchString(topic):
-		return reportTopic.FindStringSubmatch(topic)[1], "report", nil
-	case setTopic.MatchString(topic):
-		return setTopic.FindStringSubmatch(topic)[1], "set", nil
-	case replyTopic.MatchString(topic):
-		return replyTopic.FindStringSubmatch(topic)[1], "reply", nil
-	case statusTopic.MatchString(topic):
-		return statusTopic.FindStringSubmatch(topic)[1], "status", nil
+	case cmdTopic.MatchString(topic):
+		return cmdTopic.FindStringSubmatch(topic)[1], "cmd", nil
+	case stateTopic.MatchString(topic):
+		return stateTopic.FindStringSubmatch(topic)[1], "state", nil
 	default:
 		return "", "", errTopic
 	}
@@ -88,14 +82,10 @@ func (topicError) Error() string { return "invalid topic" }
 // DeviceTopic 拼出某个设备的业务主题。
 func DeviceTopic(deviceID, kind string) string {
 	switch kind {
-	case "report":
-		return "device/" + deviceID + "/property/report"
-	case "set":
-		return "device/" + deviceID + "/property/set"
-	case "reply":
-		return "device/" + deviceID + "/property/set_reply"
-	case "status":
-		return "device/" + deviceID + "/status"
+	case "cmd":
+		return "pet/collar/1_0pro/" + deviceID + "/cmd"
+	case "state":
+		return "pet/collar/1_0pro/" + deviceID + "/state"
 	default:
 		return ""
 	}
@@ -121,12 +111,12 @@ func decideDevice(deviceID, action, topic string) string {
 	switch action {
 	case "publish":
 		id, kind, err := SplitTopic(topic)
-		if err != nil || id != deviceID || kind == "set" {
+		if err != nil || id != deviceID || kind == "cmd" {
 			return "deny"
 		}
 		return "allow"
 	case "subscribe":
-		if topic == DeviceTopic(deviceID, "set") {
+		if topic == DeviceTopic(deviceID, "cmd") {
 			return "allow"
 		}
 		return "deny"
@@ -138,7 +128,7 @@ func decideDevice(deviceID, action, topic string) string {
 func decideService(action, topic string) string {
 	switch action {
 	case "publish":
-		if _, kind, err := SplitTopic(topic); err == nil && kind == "set" {
+		if _, kind, err := SplitTopic(topic); err == nil && kind == "cmd" {
 			return "allow"
 		}
 		return "deny"
@@ -155,9 +145,7 @@ func decideService(action, topic string) string {
 // ServiceFilters 是服务连接需要订阅的过滤器。设备业务主题使用共享订阅。
 func ServiceFilters() []string {
 	return []string{
-		"$share/" + ShareGroup + "/device/+/property/report",
-		"$share/" + ShareGroup + "/device/+/property/set_reply",
-		"$share/" + ShareGroup + "/device/+/status",
+		"$share/" + ShareGroup + "/pet/collar/1_0pro/+/state",
 		"$SYS/brokers/+/clients/+/connected",
 		"$SYS/brokers/+/clients/+/disconnected",
 	}

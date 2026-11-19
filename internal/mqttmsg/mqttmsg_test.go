@@ -1,123 +1,128 @@
 package mqttmsg
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestPointsMatchProtocol(t *testing.T) {
-	if len(Points) != 7 {
+	want := []string{"find_light", "buzzer", "gps_oneshot", "find_mode", "trip_track", "activate", "mic_record", "speaker_play", "voice_call"}
+	if len(Points) != len(want) {
 		t.Fatalf("points = %d", len(Points))
 	}
-	want := []string{"温湿度", "照明", "雾化", "通风", "喂食", "加热垫", "晒背灯"}
-	switches := 0
 	for i, point := range Points {
-		if point.Name != want[i] {
-			t.Fatalf("name %d = %s", i, point.Name)
-		}
-		if point.Writable {
-			switches++
+		if point.Identifier != want[i] || !point.Writable || !KnownCommand(point.Identifier) {
+			t.Fatalf("point %d = %+v", i, point)
 		}
 	}
-	if switches != 6 || IsSwitch(SensorID) || !IsSwitch("switch_bask") {
-		t.Fatal("switch set mismatch")
+	if KnownCommand("switch_light") {
+		t.Fatal("old switch accepted")
 	}
 }
 
-func TestParseReportAndRejectsMissingAsUnset(t *testing.T) {
-	payload := []byte(`{
-	  "deviceId":"94a990cb56a8",
-	  "msgId":"s3-12",
-	  "time":1762070400000,
-	  "data":{
-	    "temp_humidity_sens_2":{"value":"H:23.7C,49%;C:23.8C,48%","time":1762070400000},
-	    "switch_light":{"value":true,"time":1762070400000},
-	    "switch_mist":{"value":false,"time":1762070400000}
-	  }
-	}`)
-	report, err := ParseReport("device/94a990cb56a8/property/report", payload)
-	if err != nil {
-		t.Fatal(err)
+func TestCanonicalCommandsMatchProtocol(t *testing.T) {
+	on := true
+	off := false
+	light, err := CanonicalCommand("find_light", &on, []byte(`{"color":16711680,"freq_hz":3,"duration_min":1}`))
+	if err != nil || string(light) != `{"cmd":"find_light","on":true,"params":{"color":16711680,"duration_min":1,"freq_hz":3}}` {
+		t.Fatalf("find_light = %s %v", light, err)
 	}
-	if report.MsgID != "s3-12" || len(report.Fields) != 3 {
-		t.Fatalf("report = %+v", report)
+	trip, err := CanonicalCommand("trip_track", &on, []byte(`{"interval_min":5}`))
+	if err != nil || string(trip) != `{"cmd":"trip_track","on":true,"params":{"interval_min":5}}` {
+		t.Fatalf("trip = %s %v", trip, err)
 	}
-	seen := map[string]bool{}
-	for _, field := range report.Fields {
-		seen[field.Identifier] = true
-		if field.Identifier == "switch_fan" {
-			t.Fatal("missing switch was materialized")
-		}
+	stop, err := CanonicalCommand("trip_track", &off, nil)
+	if err != nil || string(stop) != `{"cmd":"trip_track","on":false}` {
+		t.Fatalf("stop = %s %v", stop, err)
 	}
-	if seen["switch_fan"] {
-		t.Fatal("missing field present")
+	gps, err := CanonicalCommand("gps_oneshot", nil, nil)
+	if err != nil || string(gps) != `{"cmd":"gps_oneshot"}` {
+		t.Fatalf("gps = %s %v", gps, err)
 	}
-	if _, err := ParseReport("device/94a990cb56a8/property/report", []byte(`{"deviceId":"94a990cb56a8","msgId":"s3-1","time":1,"data":{"switch_light":{"value":"true","time":1}}}`)); err == nil {
-		t.Fatal("quoted bool accepted")
+	call, err := CanonicalCommand("voice_call", &on, []byte(`{"channel":"936193","uid":1001,"token":"...","duration_min":15}`))
+	if err != nil || string(call) != `{"cmd":"voice_call","on":true,"params":{"channel":"936193","duration_min":15,"token":"...","uid":1001}}` {
+		t.Fatalf("call = %s %v", call, err)
 	}
-	if _, err := ParseReport("device/ffffffffffffffff/property/report", payload); err == nil {
-		t.Fatal("device mismatch accepted")
+	if _, err := CanonicalCommand("find_light", &on, []byte(`{"freq_hz":2}`)); err == nil {
+		t.Fatal("bad freq accepted")
+	}
+	if _, err := CanonicalCommand("voice_call", &on, []byte(`{"channel":"936193"}`)); err == nil {
+		t.Fatal("call without token accepted")
+	}
+	if _, err := CanonicalCommand("gps_oneshot", &off, nil); err == nil {
+		t.Fatal("oneshot off accepted")
 	}
 }
 
-func TestCanonicalSetRejectsSensor(t *testing.T) {
-	payload, err := CanonicalSet("srv-1", 1762070400000, "switch_light", false)
-	if err != nil {
-		t.Fatal(err)
+func TestParseStateMessages(t *testing.T) {
+	const id = "9030d6cb176c"
+	topic := DeviceTopic(id, "state")
+	reply, err := ParseState(topic, []byte(`{"ts":1760580001,"type":"cmd_result","cmd":"trip_track","result":"accepted","code":0}`))
+	if err != nil || reply.Kind != "cmd_result" || reply.Reply.Cmd != "trip_track" || reply.Reply.Result != "accepted" || reply.Reply.Code != 0 {
+		t.Fatalf("reply = %+v %v", reply, err)
 	}
-	if string(payload) != `{"msgId":"srv-1","time":1762070400000,"data":{"switch_light":false}}` {
-		t.Fatalf("payload = %s", payload)
+	location, err := ParseState(topic, []byte(`{"ts":1760580002,"type":"location","reason":"oneshot","lat":22.54,"lon":113.94,"sats":8,"valid":true}`))
+	if err != nil || location.Kind != "report" || len(location.Report.Fields) != 1 || location.Report.Fields[0].Time != 1760580002000 {
+		t.Fatalf("location = %+v %v", location, err)
 	}
-	if _, err := CanonicalSet("srv-1", 1, SensorID, false); err == nil {
-		t.Fatal("sensor write accepted")
+	mode, err := ParseState(topic, []byte(`{"type":"mode_state","find_mode":true,"trip_track":false,"find_remain_s":280,"trip_interval_s":300}`))
+	if err != nil || mode.Report.Fields[0].Identifier != "mode_state" {
+		t.Fatalf("mode = %+v %v", mode, err)
+	}
+	dp, err := ParseState(topic, []byte(`{"data":{"pet_action":"static"}}`))
+	if err != nil || len(dp.Report.Fields) != 1 || dp.Report.Fields[0].Identifier != "pet_action" || string(dp.Report.Fields[0].Value) != `"static"` {
+		t.Fatalf("dp = %+v %v", dp, err)
+	}
+	status, err := ParseState(topic, []byte("online"))
+	if err != nil || status.Kind != "status" || status.Status != "online" {
+		t.Fatalf("status = %+v %v", status, err)
+	}
+	if _, err := ParseState(topic, []byte(`{"type":"location","reason":"lost","lat":1,"lon":2,"sats":0,"valid":false,"ts":1}`)); err == nil {
+		t.Fatal("bad reason accepted")
+	}
+	if _, err := ParseState(DeviceTopic(id, "cmd"), []byte("online")); err == nil {
+		t.Fatal("cmd topic parsed as state")
 	}
 }
 
-func TestReplyDoesNotReopenTerminalState(t *testing.T) {
-	next, ok := ReplyState("sent", 0)
+func TestReplyStateUsesResult(t *testing.T) {
+	next, ok := ReplyState("sent", "success")
 	if !ok || next != "accepted" {
-		t.Fatalf("accepted = %s %v", next, ok)
+		t.Fatalf("success = %s %v", next, ok)
 	}
-	if _, ok := ReplyState("timeout", 0); ok {
+	if _, ok := ReplyState("timeout", "success"); ok {
 		t.Fatal("late reply reopened timeout")
 	}
-	if next, ok := ReplyState("sending", 1002); !ok || next != "failed" {
-		t.Fatalf("failed = %s %v", next, ok)
+	if next, ok := ReplyState("sending", "busy"); !ok || next != "failed" {
+		t.Fatalf("busy = %s %v", next, ok)
 	}
-	if next, ok := ReplyState("uncertain", 0); !ok || next != "accepted" {
-		t.Fatalf("uncertain accepted = %s %v", next, ok)
+	if next, ok := ReplyState("uncertain", "ended"); !ok || next != "accepted" {
+		t.Fatalf("ended = %s %v", next, ok)
 	}
-	if next, ok := ReplyState("uncertain", 1002); !ok || next != "failed" {
-		t.Fatalf("uncertain failed = %s %v", next, ok)
-	}
-	if _, ok := ReplyState("needs_attention", 0); ok {
+	if _, ok := ReplyState("needs_attention", "accepted"); ok {
 		t.Fatal("attention reopened")
 	}
-	if _, ok := ReplyState("cancelled", 0); ok {
+	if _, ok := ReplyState("cancelled", "failed"); ok {
 		t.Fatal("cancelled reopened")
 	}
 }
 
 func TestAccessMatrix(t *testing.T) {
-	const id = "94a990cb56a8"
+	const id = "9030d6cb176c"
 	cases := []struct {
 		kind, device, action, topic, want string
 	}{
-		{"device", id, "publish", "device/94a990cb56a8/property/report", "allow"},
-		{"device", id, "publish", "device/94a990cb56a8/property/set_reply", "allow"},
-		{"device", id, "publish", "device/94a990cb56a8/status", "allow"},
-		{"device", id, "subscribe", "device/94a990cb56a8/property/set", "allow"},
-		{"device", id, "publish", "device/94a990cb56a8/property/set", "deny"},
-		{"device", id, "publish", "device/000000000000/property/report", "deny"},
+		{"device", id, "publish", "pet/collar/1_0pro/9030d6cb176c/state", "allow"},
+		{"device", id, "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "allow"},
+		{"device", id, "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
+		{"device", id, "publish", "pet/collar/1_0pro/000000000000/state", "deny"},
 		{"device", id, "subscribe", "#", "deny"},
-		{"device", id, "subscribe", "device/94a990cb56a8/#", "deny"},
+		{"device", id, "subscribe", "pet/collar/1_0pro/9030d6cb176c/#", "deny"},
 		{"device", id, "subscribe", "$SYS/brokers/+/clients/+/connected", "deny"},
-		{"service", "", "publish", "device/94a990cb56a8/property/set", "allow"},
-		{"service", "", "publish", "device/94a990cb56a8/property/report", "deny"},
-		{"service", "", "subscribe", "$share/iot-dev/device/+/property/report", "allow"},
+		{"service", "", "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "allow"},
+		{"service", "", "publish", "pet/collar/1_0pro/9030d6cb176c/state", "deny"},
+		{"service", "", "subscribe", "$share/iot-dev/pet/collar/1_0pro/+/state", "allow"},
 		{"service", "", "subscribe", "$SYS/brokers/+/clients/+/disconnected", "allow"},
 		{"service", "", "subscribe", "#", "deny"},
-		{"app", "", "subscribe", "device/94a990cb56a8/property/set", "deny"},
-		{"unknown", "", "publish", "device/94a990cb56a8/status", "deny"},
+		{"app", "", "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
+		{"unknown", "", "publish", "pet/collar/1_0pro/9030d6cb176c/state", "deny"},
 	}
 	for _, tc := range cases {
 		if got := Decide(tc.kind, tc.device, tc.action, tc.topic); got != tc.want {
@@ -127,8 +132,8 @@ func TestAccessMatrix(t *testing.T) {
 }
 
 func TestClassifyKeepsAppAwayFromRoot(t *testing.T) {
-	kind, id := Classify("root", "94a990cb56a8")
-	if kind != "device" || id != "94a990cb56a8" {
+	kind, id := Classify("root", "9030d6cb176c")
+	if kind != "device" || id != "9030d6cb176c" {
 		t.Fatalf("device = %s %s", kind, id)
 	}
 	kind, _ = Classify("iot-dev-service", "iot-dev-service-a")

@@ -12,7 +12,7 @@ const sampleDeviceID = "94a990cb56a8"
 // Seed 写入开发租户的产品和样例设备。用户只在提供了口令时创建，重复启动不改已有口令。
 func (s *Store) Seed(ctx context.Context, tenant, adminPassword, operatorPassword string) error {
 	if _, err := s.db.ExecContext(ctx, `
-		INSERT IGNORE INTO product (tenant_id, product_id, name) VALUES (?, 'controller', 'controller')`, tenant); err != nil {
+		INSERT IGNORE INTO product (tenant_id, product_id, name) VALUES (?, 'controller', 'controller'), (?, 'collar', 'collar')`, tenant, tenant); err != nil {
 		return s.unavailable("seed", err)
 	}
 	if err := s.seedDevice(ctx, tenant, sampleDeviceID); err != nil {

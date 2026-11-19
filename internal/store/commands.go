@@ -76,8 +76,12 @@ func screenSend(deadlinePassed, found, enabled, revoked bool) string {
 	return "send"
 }
 
-// Enqueue 保存命令原文。发布发生在提交之后。
-func (s *Store) Enqueue(ctx context.Context, tenant, deviceID, identifier string, value bool, deadline time.Time) (Command, error) {
+// Enqueue 保存已经按协议生成的命令原文。发布发生在提交之后。
+// msg_id 只在库内区分命令，不会写进设备报文。
+func (s *Store) Enqueue(ctx context.Context, tenant, deviceID string, payload []byte, deadline time.Time) (Command, error) {
+	if mqttmsg.CommandName(payload) == "" {
+		return Command{}, errors.New("invalid command")
+	}
 	commandID, err := randomID("cmd-")
 	if err != nil {
 		return Command{}, s.unavailable("enqueue", err)
@@ -85,10 +89,6 @@ func (s *Store) Enqueue(ctx context.Context, tenant, deviceID, identifier string
 	msgID, err := randomID("srv-")
 	if err != nil {
 		return Command{}, s.unavailable("enqueue", err)
-	}
-	payload, err := mqttmsg.CanonicalSet(msgID, time.Now().UTC().UnixMilli(), identifier, value)
-	if err != nil {
-		return Command{}, err
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO device_command (command_id, tenant_id, device_id, msg_id, state, payload, deadline_at)
@@ -301,34 +301,60 @@ func (s *Store) ConcludeSending(ctx context.Context, commandID, state string) er
 	return nil
 }
 
-// ApplyReply 把设备应答应用到 sending、sent 或 uncertain。终态不回退。
-func (s *Store) ApplyReply(ctx context.Context, tenant, deviceID, msgID string, code int) (string, error) {
+// ApplyReply 把 cmd_result 应用到同一设备上同名命令的 sending、sent 或 uncertain。
+// 设备报文没有 msgId。还在排队的同名命令不会被这条结果提前收掉。
+func (s *Store) ApplyReply(ctx context.Context, tenant, deviceID, cmd, result string, code int) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", s.unavailable("apply_reply", err)
 	}
 	defer tx.Rollback()
-	var state string
-	err = tx.QueryRowContext(ctx, `
-		SELECT state FROM device_command
-		WHERE tenant_id = ? AND device_id = ? AND msg_id = ? FOR UPDATE`, tenant, deviceID, msgID).Scan(&state)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "unknown", tx.Commit()
-	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT command_id, state, payload FROM device_command
+		WHERE tenant_id = ? AND device_id = ? AND state IN ('pending', 'sending', 'sent', 'uncertain')
+		ORDER BY created_at DESC, command_id DESC
+		FOR UPDATE`, tenant, deviceID)
 	if err != nil {
 		return "", s.unavailable("apply_reply", err)
 	}
-	next, ok := mqttmsg.ReplyState(state, code)
-	if !ok {
-		if state == "pending" {
+	var commandID, state string
+	pending := false
+	for rows.Next() {
+		var id, rowState string
+		var payload []byte
+		if err := rows.Scan(&id, &rowState, &payload); err != nil {
+			rows.Close()
+			return "", s.unavailable("apply_reply", err)
+		}
+		if mqttmsg.CommandName(payload) != cmd {
+			continue
+		}
+		if rowState == "pending" {
+			pending = true
+			continue
+		}
+		commandID, state = id, rowState
+		break
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", s.unavailable("apply_reply", err)
+	}
+	rows.Close()
+	if commandID == "" {
+		if pending {
 			return "waiting", nil
 		}
+		return "unknown", tx.Commit()
+	}
+	next, ok := mqttmsg.ReplyState(state, result)
+	if !ok {
 		return "late", tx.Commit()
 	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE device_command SET state = ?, reply_code = ?
-		WHERE tenant_id = ? AND device_id = ? AND msg_id = ? AND state = ?`,
-		next, code, tenant, deviceID, msgID, state)
+		WHERE tenant_id = ? AND device_id = ? AND command_id = ? AND state = ?`,
+		next, code, tenant, deviceID, commandID, state)
 	if err != nil {
 		return "", s.unavailable("apply_reply", err)
 	}

@@ -64,14 +64,10 @@ func (s *Store) IngestReport(ctx context.Context, tenant string, report mqttmsg.
 }
 
 func fieldValue(field mqttmsg.Field) ([]byte, error) {
-	switch {
-	case field.Bool != nil:
-		return json.Marshal(*field.Bool)
-	case field.Text != nil:
-		return json.Marshal(*field.Text)
-	default:
+	if len(field.Value) == 0 {
 		return nil, errors.New("empty field")
 	}
+	return field.Value, nil
 }
 
 // Properties 返回当前属性。没有上报过的功能点不出现。
