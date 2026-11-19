@@ -1,0 +1,2 @@
+ALTER TABLE device
+  ADD COLUMN topic_model VARCHAR(32) NOT NULL DEFAULT '1_0pro';

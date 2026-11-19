@@ -64,7 +64,7 @@ var (
 // ParseState 解析设备发到 state 主题的报文。
 // 在线是纯文本 online 或 offline。其余按 type 区分；没有 type、只有 data 的对象是 DP。
 func ParseState(topic string, payload []byte) (State, error) {
-	deviceID, kind, err := SplitTopic(topic)
+	deviceID, _, kind, err := SplitTopic(topic)
 	if err != nil || kind != "state" {
 		return State{}, errMessage
 	}

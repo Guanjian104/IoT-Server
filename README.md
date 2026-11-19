@@ -18,14 +18,14 @@
 
 平台管理员可以登记设备、改授权、启用、禁用和吊销。普通用户按设备持有 `manage`、`view`、`call`、`ticket`。`manage` 覆盖读取和发令；`view` 可以读设备和会话。登录每用户名每分钟 20 次，发令每用户每分钟 30 次，计数在 Redis。Redis 失败时这两类请求返回 503。
 
-设备编号是 12 位小写十六进制，取项圈 MAC。私有服主题是 `pet/collar/1_0pro/{mac}/cmd` 和 `pet/collar/1_0pro/{mac}/state`。下发命令没有 `msgId`，命令名是 `find_light`、`buzzer`、`gps_oneshot`、`find_mode`、`trip_track`、`activate`、`mic_record`、`speaker_play`、`voice_call`。设备在 `state` 上回复 `cmd_result`，并上报 `location`、`mode_state`、DP，以及纯文本 `online` / `offline`。命令先入库再发布，状态有 `pending`、`sending`、`sent`、`accepted`、`failed`、`timeout`、`uncertain`、`needs_attention`、`cancelled`。`accepted` 表示收到 `accepted`、`success` 或 `ended`。`failed` 和 `busy` 收成 `failed`。`uncertain` 和 `needs_attention` 可以人工重试或关闭；关闭收成 `failed`。
+设备编号是 12 位小写十六进制，取项圈 MAC。私有服主题按设备登记的代次选择：`1_0pro` 使用 `pet/collar/1_0pro/{mac}/cmd` 和 `pet/collar/1_0pro/{mac}/state`，`2_0_test` 把路径中的代次换成 `2_0_test`。未登记代次时按 `1_0pro`。下发命令没有 `msgId`，命令名是 `find_light`、`buzzer`、`gps_oneshot`、`find_mode`、`trip_track`、`activate`、`mic_record`、`speaker_play`、`voice_call`。设备在 `state` 上回复 `cmd_result`，并上报 `location`、`mode_state`、DP，以及纯文本 `online` / `offline`。命令先入库再发布，状态有 `pending`、`sending`、`sent`、`accepted`、`failed`、`timeout`、`uncertain`、`needs_attention`、`cancelled`。`accepted` 表示收到 `accepted`、`success` 或 `ended`。`failed` 和 `busy` 收成 `failed`。`uncertain` 和 `needs_attention` 可以人工重试或关闭；关闭收成 `failed`。
 
 设备 MQTT 使用共享用户名 `root`，客户端 ID 等于设备编号，口令来自 `IOT_MQTT_DEVICE_PASSWORD`。服务账号用户名固定为 `iot-dev-service`。用户名以 `app:` 开头的连接会被拒绝。
 
 | 角色 | 允许的主题 |
 |---|---|
-| 设备 | 发布自己的 `pet/collar/1_0pro/{mac}/state`；订阅自己的 `pet/collar/1_0pro/{mac}/cmd` |
-| 服务 | 发布 `pet/collar/1_0pro/{mac}/cmd`；共享订阅 `state`，并订阅 `$SYS` 连接事件 |
+| 设备 | 发布自己这一代次的 `pet/collar/{代次}/{mac}/state`；订阅自己这一代次的 `pet/collar/{代次}/{mac}/cmd` |
+| 服务 | 发布对应代次的 `cmd`；共享订阅两个代次的 `state`，并订阅 `$SYS` 连接事件 |
 
 钩子在独立监听上校验认证和 ACL。禁用或吊销后，进程调用 EMQX 管理接口断开该客户端。上报按租户、设备、载荷摘要去重。服务连接使用持久会话：消息写入 MySQL 后才确认，未确认的消息可从 `mqtt_inbox` 恢复。入站队列上限 256 条。依赖短时不可用时，已收到的消息留在队头按顺序重试，服务连接保持重连。
 
@@ -103,6 +103,7 @@ IOT_INSTANCE_ID=local-1 IOT_CONFIG_VERSION=dev ./bin/server
 | POST | `/api/v1/commands/{commandID}/close` | 把上述状态收成 `failed` |
 | POST | `/api/v1/devices/{id}/grants` | 增加 `manage`、`view`、`call` 或 `ticket` |
 | DELETE | `/api/v1/devices/{id}/grants` | 收回一项授权 |
+| POST | `/api/v1/devices/{id}/topic-model` | 把主题代次改成 `1_0pro` 或 `2_0_test` |
 | POST | `/api/v1/devices/{id}/disable` | 禁用并尝试踢线 |
 | POST | `/api/v1/devices/{id}/enable` | 重新启用 |
 | POST | `/api/v1/devices/{id}/revoke` | 吊销接入资格并尝试踢线 |

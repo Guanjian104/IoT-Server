@@ -107,25 +107,32 @@ func TestReplyStateUsesResult(t *testing.T) {
 func TestAccessMatrix(t *testing.T) {
 	const id = "9030d6cb176c"
 	cases := []struct {
-		kind, device, action, topic, want string
+		kind, device, model, action, topic, want string
 	}{
-		{"device", id, "publish", "pet/collar/1_0pro/9030d6cb176c/state", "allow"},
-		{"device", id, "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "allow"},
-		{"device", id, "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
-		{"device", id, "publish", "pet/collar/1_0pro/000000000000/state", "deny"},
-		{"device", id, "subscribe", "#", "deny"},
-		{"device", id, "subscribe", "pet/collar/1_0pro/9030d6cb176c/#", "deny"},
-		{"device", id, "subscribe", "$SYS/brokers/+/clients/+/connected", "deny"},
-		{"service", "", "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "allow"},
-		{"service", "", "publish", "pet/collar/1_0pro/9030d6cb176c/state", "deny"},
-		{"service", "", "subscribe", "$share/iot-dev/pet/collar/1_0pro/+/state", "allow"},
-		{"service", "", "subscribe", "$SYS/brokers/+/clients/+/disconnected", "allow"},
-		{"service", "", "subscribe", "#", "deny"},
-		{"app", "", "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
-		{"unknown", "", "publish", "pet/collar/1_0pro/9030d6cb176c/state", "deny"},
+		{"device", id, Model10Pro, "publish", "pet/collar/1_0pro/9030d6cb176c/state", "allow"},
+		{"device", id, Model10Pro, "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "allow"},
+		{"device", id, Model10Pro, "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
+		{"device", id, Model10Pro, "publish", "pet/collar/1_0pro/000000000000/state", "deny"},
+		{"device", id, Model10Pro, "subscribe", "pet/collar/2_0_test/9030d6cb176c/cmd", "deny"},
+		{"device", id, Model20Test, "subscribe", "pet/collar/2_0_test/9030d6cb176c/cmd", "allow"},
+		{"device", id, Model20Test, "publish", "pet/collar/2_0_test/9030d6cb176c/state", "allow"},
+		{"device", id, Model20Test, "publish", "pet/collar/1_0pro/9030d6cb176c/state", "deny"},
+		{"device", id, Model20Test, "subscribe", "pet/collar/#", "deny"},
+		{"device", id, Model10Pro, "subscribe", "#", "deny"},
+		{"device", id, Model10Pro, "subscribe", "pet/collar/1_0pro/9030d6cb176c/#", "deny"},
+		{"device", id, Model10Pro, "subscribe", "$SYS/brokers/+/clients/+/connected", "deny"},
+		{"service", "", "", "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "allow"},
+		{"service", "", "", "publish", "pet/collar/2_0_test/9030d6cb176c/cmd", "allow"},
+		{"service", "", "", "publish", "pet/collar/1_0pro/9030d6cb176c/state", "deny"},
+		{"service", "", "", "subscribe", "$share/iot-dev/pet/collar/1_0pro/+/state", "allow"},
+		{"service", "", "", "subscribe", "$share/iot-dev/pet/collar/2_0_test/+/state", "allow"},
+		{"service", "", "", "subscribe", "$SYS/brokers/+/clients/+/disconnected", "allow"},
+		{"service", "", "", "subscribe", "#", "deny"},
+		{"app", "", "", "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
+		{"unknown", "", "", "publish", "pet/collar/1_0pro/9030d6cb176c/state", "deny"},
 	}
 	for _, tc := range cases {
-		if got := Decide(tc.kind, tc.device, tc.action, tc.topic); got != tc.want {
+		if got := Decide(tc.kind, tc.device, tc.model, tc.action, tc.topic); got != tc.want {
 			t.Fatalf("%+v got %s", tc, got)
 		}
 	}

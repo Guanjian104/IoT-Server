@@ -56,21 +56,25 @@ func ServiceClientID(instance string) string {
 	return b.String()
 }
 
-var (
-	cmdTopic   = regexp.MustCompile(`^pet/collar/1_0pro/([0-9a-f]{12})/cmd$`)
-	stateTopic = regexp.MustCompile(`^pet/collar/1_0pro/([0-9a-f]{12})/state$`)
+const (
+	Model10Pro  = "1_0pro"
+	Model20Test = "2_0_test"
 )
 
+var businessTopic = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test)/([0-9a-f]{12})/(cmd|state)$`)
+
+// KnownModel 判断主题代次是否已接入。
+func KnownModel(model string) bool {
+	return model == Model10Pro || model == Model20Test
+}
+
 // SplitTopic 解析项圈业务主题。kind 为 cmd 或 state。
-func SplitTopic(topic string) (deviceID, kind string, err error) {
-	switch {
-	case cmdTopic.MatchString(topic):
-		return cmdTopic.FindStringSubmatch(topic)[1], "cmd", nil
-	case stateTopic.MatchString(topic):
-		return stateTopic.FindStringSubmatch(topic)[1], "state", nil
-	default:
-		return "", "", errTopic
+func SplitTopic(topic string) (deviceID, model, kind string, err error) {
+	match := businessTopic.FindStringSubmatch(topic)
+	if match == nil {
+		return "", "", "", errTopic
 	}
+	return match[2], match[1], match[3], nil
 }
 
 var errTopic = topicError{}
@@ -79,24 +83,31 @@ type topicError struct{}
 
 func (topicError) Error() string { return "invalid topic" }
 
-// DeviceTopic 拼出某个设备的业务主题。
+// DeviceTopic 拼出 1_0pro 设备的业务主题。
 func DeviceTopic(deviceID, kind string) string {
+	return Topic(Model10Pro, deviceID, kind)
+}
+
+// Topic 按设备登记的代次拼出业务主题。
+func Topic(model, deviceID, kind string) string {
+	if !KnownModel(model) || !ValidDeviceID(deviceID) {
+		return ""
+	}
 	switch kind {
-	case "cmd":
-		return "pet/collar/1_0pro/" + deviceID + "/cmd"
-	case "state":
-		return "pet/collar/1_0pro/" + deviceID + "/state"
+	case "cmd", "state":
+		return "pet/collar/" + model + "/" + deviceID + "/" + kind
 	default:
 		return ""
 	}
 }
 
 // Decide 判断一个已经区分过身份的主体能否发布或订阅该主题。
-func Decide(kind, deviceID, action, topic string) string {
+// model 是这台设备登记的主题代次；服务账号不使用它。
+func Decide(kind, deviceID, model, action, topic string) string {
 	action = strings.ToLower(strings.TrimSpace(action))
 	switch kind {
 	case "device":
-		return decideDevice(deviceID, action, topic)
+		return decideDevice(deviceID, model, action, topic)
 	case "service":
 		return decideService(action, topic)
 	default:
@@ -104,19 +115,19 @@ func Decide(kind, deviceID, action, topic string) string {
 	}
 }
 
-func decideDevice(deviceID, action, topic string) string {
-	if deviceID == "" || strings.ContainsAny(topic, "#+") {
+func decideDevice(deviceID, model, action, topic string) string {
+	if deviceID == "" || !KnownModel(model) || strings.ContainsAny(topic, "#+") {
 		return "deny"
 	}
 	switch action {
 	case "publish":
-		id, kind, err := SplitTopic(topic)
-		if err != nil || id != deviceID || kind == "cmd" {
+		id, got, kind, err := SplitTopic(topic)
+		if err != nil || id != deviceID || got != model || kind != "state" {
 			return "deny"
 		}
 		return "allow"
 	case "subscribe":
-		if topic == DeviceTopic(deviceID, "cmd") {
+		if topic == Topic(model, deviceID, "cmd") {
 			return "allow"
 		}
 		return "deny"
@@ -128,7 +139,7 @@ func decideDevice(deviceID, action, topic string) string {
 func decideService(action, topic string) string {
 	switch action {
 	case "publish":
-		if _, kind, err := SplitTopic(topic); err == nil && kind == "cmd" {
+		if _, _, kind, err := SplitTopic(topic); err == nil && kind == "cmd" {
 			return "allow"
 		}
 		return "deny"
@@ -145,7 +156,8 @@ func decideService(action, topic string) string {
 // ServiceFilters 是服务连接需要订阅的过滤器。设备业务主题使用共享订阅。
 func ServiceFilters() []string {
 	return []string{
-		"$share/" + ShareGroup + "/pet/collar/1_0pro/+/state",
+		"$share/" + ShareGroup + "/pet/collar/" + Model10Pro + "/+/state",
+		"$share/" + ShareGroup + "/pet/collar/" + Model20Test + "/+/state",
 		"$SYS/brokers/+/clients/+/connected",
 		"$SYS/brokers/+/clients/+/disconnected",
 	}

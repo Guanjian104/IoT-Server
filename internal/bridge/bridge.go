@@ -170,7 +170,7 @@ func (b *Bridge) onMessage(_ mqtt.Client, msg mqtt.Message) {
 
 func (b *Bridge) handle(topic string, payload []byte) error {
 	if len(payload) > 64*1024 {
-		deviceID, _, _ := mqttmsg.SplitTopic(topic)
+		deviceID, _, _, _ := mqttmsg.SplitTopic(topic)
 		if err := b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "too_large"); err != nil {
 			return err
 		}
@@ -279,12 +279,12 @@ func (b *Bridge) retryPoison() {
 	_ = b.store.SweepInbox(b.ctx, b.tenant)
 }
 
-func (b *Bridge) deviceOpen(deviceID string) (bool, error) {
+func (b *Bridge) deviceOpen(deviceID string) (bool, string, error) {
 	gate, err := b.store.DeviceGate(b.ctx, b.tenant, deviceID)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
-	return gate.Found && gate.Enabled && !gate.Revoked, nil
+	return gate.Found && gate.Enabled && !gate.Revoked, gate.TopicModel, nil
 }
 
 func (b *Bridge) note() {
@@ -301,15 +301,15 @@ func (b *Bridge) dispatch(topic string, payload []byte) error {
 		}
 		return b.store.ApplySession(b.ctx, b.tenant, deviceID, event)
 	}
-	deviceID, kind, err := mqttmsg.SplitTopic(topic)
+	deviceID, model, kind, err := mqttmsg.SplitTopic(topic)
 	if err != nil {
 		return b.store.RejectInbound(b.ctx, b.tenant, "", topic, "topic")
 	}
-	open, err := b.deviceOpen(deviceID)
+	open, stored, err := b.deviceOpen(deviceID)
 	if err != nil {
 		return err
 	}
-	if !open {
+	if !open || stored != model {
 		b.note()
 		return b.store.RejectInbound(b.ctx, b.tenant, deviceID, topic, "device")
 	}
@@ -474,7 +474,21 @@ func (b *Bridge) publishOne(item store.Outbound) {
 		return
 	}
 	// QoS 1 只保证至少送达一次。设备报文没有 msgId，相同载荷再次到达会被再执行。
-	token := b.client.Publish(mqttmsg.DeviceTopic(item.DeviceID, "cmd"), 1, false, item.Payload)
+	lookup, cancelLookup := context.WithTimeout(b.ctx, commandScanTimeout)
+	gate, err := b.store.DeviceGate(lookup, b.tenant, item.DeviceID)
+	cancelLookup()
+	topic := ""
+	if err == nil {
+		topic = mqttmsg.Topic(gate.TopicModel, item.DeviceID, "cmd")
+	}
+	if topic == "" {
+		if err == nil {
+			err = errInvalidDevice
+		}
+		b.recordPublish(item, false, err)
+		return
+	}
+	token := b.client.Publish(topic, 1, false, item.Payload)
 	uncertain := !token.WaitTimeout(wait)
 	if uncertain || token.Error() != nil {
 		b.recordPublish(item, uncertain || token.Error() == nil, token.Error())

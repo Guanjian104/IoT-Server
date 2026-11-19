@@ -79,14 +79,16 @@ func (s *Server) mqttACL(w http.ResponseWriter, r *http.Request) {
 		body.ClientID = body.ClientID2
 	}
 	kind, deviceID := mqttmsg.Classify(body.Username, body.ClientID)
+	model := ""
 	if kind == "device" {
 		gate, err := s.store.DeviceGate(r.Context(), s.tenant, deviceID)
 		if err != nil || !gate.Found || !gate.Enabled || gate.Revoked {
 			writeDecision(w, "deny")
 			return
 		}
+		model = gate.TopicModel
 	}
-	writeDecision(w, mqttmsg.Decide(kind, deviceID, body.Action, body.Topic))
+	writeDecision(w, mqttmsg.Decide(kind, deviceID, model, body.Action, body.Topic))
 }
 
 func (s *Server) hookOK(r *http.Request) bool {

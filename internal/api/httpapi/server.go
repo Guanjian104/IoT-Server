@@ -80,6 +80,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/commands/{commandID}/close", s.closeCommand)
 	mux.HandleFunc("POST /api/v1/devices/{id}/grants", s.putGrant)
 	mux.HandleFunc("DELETE /api/v1/devices/{id}/grants", s.deleteGrant)
+	mux.HandleFunc("POST /api/v1/devices/{id}/topic-model", s.setTopicModel)
 	mux.HandleFunc("POST /api/v1/devices/{id}/disable", s.disableDevice)
 	mux.HandleFunc("POST /api/v1/devices/{id}/enable", s.enableDevice)
 	mux.HandleFunc("POST /api/v1/devices/{id}/revoke", s.revokeDevice)
@@ -164,14 +165,22 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		DeviceID  string `json:"device_id"`
-		ProductID string `json:"product_id"`
+		DeviceID   string `json:"device_id"`
+		ProductID  string `json:"product_id"`
+		TopicModel string `json:"topic_model"`
 	}
 	if !decode(w, r, &body) || !mqttmsg.ValidDeviceID(body.DeviceID) || body.ProductID == "" {
 		writeError(w, http.StatusBadRequest, "invalid")
 		return
 	}
-	err := s.store.CreateDevice(r.Context(), user.TenantID, body.DeviceID, body.ProductID)
+	if body.TopicModel == "" {
+		body.TopicModel = mqttmsg.Model10Pro
+	}
+	if !mqttmsg.KnownModel(body.TopicModel) {
+		writeError(w, http.StatusBadRequest, "invalid")
+		return
+	}
+	err := s.store.CreateDevice(r.Context(), user.TenantID, body.DeviceID, body.ProductID, body.TopicModel)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "invalid")
 		return
@@ -185,7 +194,7 @@ func (s *Server) createDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("device created", "request_id", requestID(r), "device_id", body.DeviceID)
-	writeJSON(w, http.StatusCreated, map[string]any{"device_id": body.DeviceID, "product_id": body.ProductID})
+	writeJSON(w, http.StatusCreated, map[string]any{"device_id": body.DeviceID, "product_id": body.ProductID, "topic_model": body.TopicModel})
 }
 
 func (s *Server) getDevice(w http.ResponseWriter, r *http.Request) {
@@ -428,6 +437,40 @@ func (s *Server) disableDevice(w http.ResponseWriter, r *http.Request) {
 	}, true)
 }
 
+func (s *Server) setTopicModel(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.user(w, r)
+	if !ok {
+		return
+	}
+	if !user.PlatformAdmin {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	deviceID := r.PathValue("id")
+	if !mqttmsg.ValidDeviceID(deviceID) {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	var body struct {
+		TopicModel string `json:"topic_model"`
+	}
+	if !decode(w, r, &body) || !mqttmsg.KnownModel(body.TopicModel) {
+		writeError(w, http.StatusBadRequest, "invalid")
+		return
+	}
+	if err := s.store.SetTopicModel(r.Context(), user.TenantID, deviceID, body.TopicModel); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	if s.log != nil {
+		s.log.Info("device topic model changed", "request_id", requestID(r), "device_id", deviceID, "topic_model", body.TopicModel)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"device_id": deviceID, "topic_model": body.TopicModel})
+}
+
 func (s *Server) enableDevice(w http.ResponseWriter, r *http.Request) {
 	s.setAccess(w, r, func(ctx context.Context, tenant, deviceID string) error {
 		return s.store.SetEnabled(ctx, tenant, deviceID, true)
@@ -597,6 +640,7 @@ func deviceJSON(device store.Device) map[string]any {
 	return map[string]any{
 		"device_id":          device.DeviceID,
 		"product_id":         device.Product,
+		"topic_model":        device.TopicModel,
 		"enabled":            device.Enabled,
 		"credential_revoked": device.Revoked,
 	}

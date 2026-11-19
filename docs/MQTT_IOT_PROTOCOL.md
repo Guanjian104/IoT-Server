@@ -14,6 +14,8 @@
 | `pet/collar/1_0pro/{mac}/cmd` | 云 → 设备 | 控制指令 |
 | `pet/collar/1_0pro/{mac}/state` | 设备 → 云 | 在线 / cmd_result / location / DP |
 
+`2_0_test` 固件使用同一套报文，只把路径中的 `1_0pro` 换成 `2_0_test`。一台设备只登记其中一个代次，不能订另一代次，也不能订 `pet/collar/#`。
+
 Host `116.169.215.214:11883`，明文 MQTT；账号见配置宏。
 
 ### EMQX Cloud（`PETCOLLAR_MQTT_SERVER_PRIVATE=0`）

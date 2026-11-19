@@ -11,10 +11,11 @@ import (
 
 // Device 是租户内的一台设备。
 type Device struct {
-	DeviceID string
-	Product  string
-	Enabled  bool
-	Revoked  bool
+	DeviceID   string
+	Product    string
+	TopicModel string
+	Enabled    bool
+	Revoked    bool
 }
 
 // Capability 是设备上的一个功能点。
@@ -46,13 +47,17 @@ type Status struct {
 
 // DeviceGate 是 MQTT 认证使用的启用状态。
 type DeviceGate struct {
-	Found   bool
-	Enabled bool
-	Revoked bool
+	Found      bool
+	Enabled    bool
+	Revoked    bool
+	TopicModel string
 }
 
 // CreateDevice 登记一台设备，并写入当前固件的全部功能点。
-func (s *Store) CreateDevice(ctx context.Context, tenant, deviceID, productID string) error {
+func (s *Store) CreateDevice(ctx context.Context, tenant, deviceID, productID, topicModel string) error {
+	if !mqttmsg.KnownModel(topicModel) {
+		return ErrNotFound
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return s.unavailable("create_device", err)
@@ -67,8 +72,8 @@ func (s *Store) CreateDevice(ctx context.Context, tenant, deviceID, productID st
 		return s.unavailable("create_device", err)
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO device (tenant_id, device_id, product_id, enabled, credential_revoked)
-		VALUES (?, ?, ?, 1, 0)`, tenant, deviceID, productID)
+		INSERT INTO device (tenant_id, device_id, product_id, topic_model, enabled, credential_revoked)
+		VALUES (?, ?, ?, ?, 1, 0)`, tenant, deviceID, productID, topicModel)
 	if err != nil {
 		if isDuplicate(err) {
 			return ErrConflict
@@ -98,8 +103,8 @@ func (s *Store) GetDevice(ctx context.Context, tenant, deviceID string) (Device,
 	var device Device
 	var enabled, revoked int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT device_id, product_id, enabled, credential_revoked
-		FROM device WHERE tenant_id = ? AND device_id = ?`, tenant, deviceID).Scan(&device.DeviceID, &device.Product, &enabled, &revoked)
+		SELECT device_id, product_id, topic_model, enabled, credential_revoked
+		FROM device WHERE tenant_id = ? AND device_id = ?`, tenant, deviceID).Scan(&device.DeviceID, &device.Product, &device.TopicModel, &enabled, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, ErrNotFound
 	}
@@ -120,7 +125,7 @@ func (s *Store) DeviceGate(ctx context.Context, tenant, deviceID string) (Device
 	if err != nil {
 		return DeviceGate{}, err
 	}
-	return DeviceGate{Found: true, Enabled: device.Enabled, Revoked: device.Revoked}, nil
+	return DeviceGate{Found: true, Enabled: device.Enabled, Revoked: device.Revoked, TopicModel: device.TopicModel}, nil
 }
 
 // ListDevices 列出调用方可见的设备。平台管理员看本租户全部，其余用户只看已授权设备。
@@ -131,11 +136,11 @@ func (s *Store) ListDevices(ctx context.Context, user User) ([]Device, error) {
 	)
 	if user.PlatformAdmin {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT device_id, product_id, enabled, credential_revoked
+			SELECT device_id, product_id, topic_model, enabled, credential_revoked
 			FROM device WHERE tenant_id = ? ORDER BY device_id`, user.TenantID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT DISTINCT d.device_id, d.product_id, d.enabled, d.credential_revoked
+			SELECT DISTINCT d.device_id, d.product_id, d.topic_model, d.enabled, d.credential_revoked
 			FROM device d
 			JOIN user_device_grant g ON g.tenant_id = d.tenant_id AND g.device_id = d.device_id AND g.user_id = ?
 			WHERE d.tenant_id = ? AND g.permission IN ('view', 'manage')
@@ -157,7 +162,7 @@ func scanDevices(rows *sql.Rows) ([]Device, error) {
 	for rows.Next() {
 		var device Device
 		var enabled, revoked int
-		if err := rows.Scan(&device.DeviceID, &device.Product, &enabled, &revoked); err != nil {
+		if err := rows.Scan(&device.DeviceID, &device.Product, &device.TopicModel, &enabled, &revoked); err != nil {
 			return nil, err
 		}
 		device.Enabled = enabled == 1
@@ -199,6 +204,34 @@ func (s *Store) Capabilities(ctx context.Context, tenant, deviceID string) ([]Ca
 		out = []Capability{}
 	}
 	return out, nil
+}
+
+// SetTopicModel 修改设备使用的主题代次。未知代次视为设备不存在，避免把非法值写进库。
+func (s *Store) SetTopicModel(ctx context.Context, tenant, deviceID, topicModel string) error {
+	if !mqttmsg.KnownModel(topicModel) {
+		return ErrNotFound
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE device SET topic_model = ? WHERE tenant_id = ? AND device_id = ?`, topicModel, tenant, deviceID)
+	if err != nil {
+		return s.unavailable("topic_model", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return s.unavailable("topic_model", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	var one int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM device WHERE tenant_id = ? AND device_id = ?`, tenant, deviceID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return s.unavailable("topic_model", err)
+	}
+	return nil
 }
 
 // SetEnabled 启用或停用设备。
