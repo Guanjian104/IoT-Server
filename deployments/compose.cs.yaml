@@ -2,7 +2,7 @@ name: eco-device
 
 services:
   mysql:
-    image: mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
+    image: docker.m.daocloud.io/library/mysql:8.4.13@sha256:a81d043930e51745522bd5c430961cf8286f0a23f0a9a2a6e0108f7ea71b0902
     container_name: eco-device-mysql
     mem_limit: 1024m
     memswap_limit: 1024m
@@ -34,7 +34,7 @@ services:
     networks: [eco-device]
 
   redis:
-    image: redis:8.10.3@sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53
+    image: docker.m.daocloud.io/library/redis:8.10.3@sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53
     container_name: eco-device-redis
     mem_limit: 256m
     memswap_limit: 256m
@@ -69,7 +69,7 @@ services:
     networks: [eco-device]
 
   emqx:
-    image: emqx/emqx:6.3.3@sha256:54778dba62a5cbcb03ca381c9bceb3d8a87cab9e3da155ed3607d994454df900
+    image: docker.m.daocloud.io/emqx/emqx:6.3.3@sha256:54778dba62a5cbcb03ca381c9bceb3d8a87cab9e3da155ed3607d994454df900
     container_name: eco-device-emqx
     mem_limit: 512m
     memswap_limit: 512m
