@@ -152,6 +152,47 @@ func TestSFUAddrStaysLocal(t *testing.T) {
 	}
 }
 
+func TestSFUPublicEndpoint(t *testing.T) {
+	cfg, err := Load(func(key string) (string, bool) {
+		switch key {
+		case "IOT_SFU_ADDR":
+			return "127.0.0.1:18096", true
+		case "IOT_SFU_PUBLIC_IP":
+			return "203.0.113.5", true
+		case "IOT_SFU_PUBLIC_URL":
+			return "http://203.0.113.5:18196", true
+		case "IOT_SFU_UDP_MIN":
+			return "40100", true
+		case "IOT_SFU_UDP_MAX":
+			return "40131", true
+		default:
+			return "", false
+		}
+	})
+	if err != nil || cfg.SFUPublicIP != "203.0.113.5" || cfg.SFUPublicURL != "http://203.0.113.5:18196" || cfg.SFUUDPMin != 40100 || cfg.SFUUDPMax != 40131 {
+		t.Fatalf("sfu = %+v %v", cfg, err)
+	}
+	_, err = Load(func(key string) (string, bool) {
+		switch key {
+		case "IOT_SFU_ADDR":
+			return "127.0.0.1:18096", true
+		case "IOT_SFU_UDP_MIN":
+			return "40000", true
+		case "IOT_SFU_UDP_MAX":
+			return "40063", true
+		case "IOT_SFU_PUBLIC_IP":
+			return "203.0.113.5", true
+		case "IOT_SFU_PUBLIC_URL":
+			return "http://203.0.113.5:18196", true
+		default:
+			return "", false
+		}
+	})
+	if err == nil || err.Error() != "invalid IOT_SFU_UDP_MIN" {
+		t.Fatalf("occupied range error = %v", err)
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.env")

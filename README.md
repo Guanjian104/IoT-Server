@@ -40,7 +40,9 @@
 
 开流和关流读取 `rtc_control_plan` 里的测试结果。空结果按成功解释。这套计划不向固件发送视频指令。后台任务放在 MySQL，用 `FOR UPDATE SKIP LOCKED` 领取，并用 `lease_token` 核对完成和重试。默认延迟关流 30 秒，观看加入宽限 15 秒，振铃超时 30 秒。
 
-未设置 `IOT_SFU_ADDR` 时，观看返回 `provider=test`、`connectable=false`。设置之后，开流任务会在本机 Pion SFU 上建立房间，观看接口签发最多两分钟的可连接凭证，并带上 `whep_url`。SFU 只转发 RTP，只走本机 IPv4，关闭 mDNS。`viewer:` 只能订阅，`device:` 发布公开流，`call:` 发布通话上行且不转给观看者。通话 HTTP 接口不返回发布地址。WHIP 和 WHEP 的 SDP 交换在 SFU 自己的监听上：`POST`、`GET`、`PUT` `/whip/{roomID}` 和 `/whep/{roomID}`。
+未设置 `IOT_SFU_ADDR` 时，观看返回 `provider=test`、`connectable=false`。设置之后，开流任务会在本机 Pion SFU 上建立房间，观看接口签发最多两分钟的可连接凭证，并带上 `whep_url`。SFU 只转发 RTP，只走本机 IPv4，关闭 mDNS。`viewer:` 只能订阅，`device:` 发布公开流，`call:` 发布通话上行且不转给观看者。WHIP 和 WHEP 的 SDP 交换在 SFU 自己的监听上：`POST`、`GET`、`PUT` `/whip/{roomID}` 和 `/whep/{roomID}`。
+
+配齐 `IOT_SFU_PUBLIC_IP`、`IOT_SFU_PUBLIC_URL` 和 UDP 端口范围后，开启 `voice_call` 会建一个房间，把设备的 WHIP 地址和 10 分钟凭证放进 `cmd`，并在 202 响应的 `webrtc` 里给出对端凭证。设备地址走公网 IPv4，观看地址仍用本机监听。没有这组配置时，`voice_call` 返回 503。字段和交换顺序见 `docs/WebRTC设备对接.md`。
 
 ## 启动
 
@@ -98,7 +100,7 @@ IOT_INSTANCE_ID=local-1 IOT_CONFIG_VERSION=dev ./bin/server
 | GET | `/api/v1/devices/{id}/status` | `mqtt_online`、`rtc_connected`、`track_ready` 和设备自报状态 |
 | GET | `/api/v1/devices/{id}/capabilities` | 功能点 |
 | GET | `/api/v1/devices/{id}/properties` | 当前属性 |
-| POST | `/api/v1/devices/{id}/commands` | 下发一路开关，202 |
+| POST | `/api/v1/devices/{id}/commands` | 下发一条命令，202。公网 SFU 已配置时，`voice_call` 的响应带对端 `webrtc` |
 | GET | `/api/v1/commands/{commandID}` | 命令状态 |
 | POST | `/api/v1/commands/{commandID}/retry` | 重试 `uncertain` 或 `needs_attention` |
 | POST | `/api/v1/commands/{commandID}/close` | 把上述状态收成 `failed` |
@@ -138,6 +140,10 @@ IOT_INSTANCE_ID=local-1 IOT_CONFIG_VERSION=dev ./bin/server
 | `IOT_HTTP_ADDR` | `127.0.0.1:8080` | 打开 MQTT 时主机必须是回环地址 |
 | `IOT_HOOK_ADDR` | 不监听 | 回环或私网地址，且与业务监听不同 |
 | `IOT_SFU_ADDR` | 不监听 | 回环地址，且与业务监听、钩子都不同 |
+| `IOT_SFU_PUBLIC_IP` | 不改写候选地址 | 公网 IPv4。和下面三项成组出现，且必须已设置 `IOT_SFU_ADDR` |
+| `IOT_SFU_PUBLIC_URL` | 不发给设备 | `http` 或 `https`，带端口。主机是 IP 时必须等于公网 IPv4 |
+| `IOT_SFU_UDP_MIN` | 临时端口 | 1024–65535，且区间不能碰上 `40000–40063` |
+| `IOT_SFU_UDP_MAX` | 临时端口 | 大于或等于 `IOT_SFU_UDP_MIN` |
 | `IOT_INSTANCE_ID` | 主机名和进程号 | 服务 MQTT 客户端 ID 由它生成 |
 | `IOT_CONFIG_VERSION` | `dev` | 只出现在版本探针和启动日志 |
 | `IOT_LOG_LEVEL` | `info` | `debug`、`info`、`warn`、`error` |

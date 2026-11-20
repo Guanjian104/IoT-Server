@@ -22,6 +22,10 @@ type Config struct {
 	HTTPAddr           string
 	HookAddr           string
 	SFUAddr            string
+	SFUPublicIP        string
+	SFUPublicURL       string
+	SFUUDPMin          int
+	SFUUDPMax          int
 	InstanceID         string
 	ConfigVersion      string
 	LogLevel           string
@@ -58,6 +62,10 @@ var knownKeys = []string{
 	"IOT_HTTP_ADDR",
 	"IOT_HOOK_ADDR",
 	"IOT_SFU_ADDR",
+	"IOT_SFU_PUBLIC_IP",
+	"IOT_SFU_PUBLIC_URL",
+	"IOT_SFU_UDP_MIN",
+	"IOT_SFU_UDP_MAX",
 	"IOT_INSTANCE_ID",
 	"IOT_CONFIG_VERSION",
 	"IOT_LOG_LEVEL",

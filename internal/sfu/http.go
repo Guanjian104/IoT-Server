@@ -16,10 +16,11 @@ import (
 
 // Node 在本机提供 WHIP、WHEP，并保管这些房间的短期凭证密钥。
 type Node struct {
-	api    *webrtc.API
-	secret []byte
-	base   string
-	http   *http.Server
+	api       *webrtc.API
+	secret    []byte
+	base      string
+	publicURL string
+	http      *http.Server
 
 	mu        sync.Mutex
 	rooms     map[string]*Room
@@ -30,8 +31,17 @@ type Node struct {
 
 // Listen 在本机地址上启动 WHIP 和 WHEP。端口可以是 0。
 func Listen(addr string) (*Node, error) {
+	return ListenEndpoint(addr, Endpoint{})
+}
+
+// ListenEndpoint 在本机地址上启动 WHIP 和 WHEP。Endpoint 把发给设备的地址改成公网地址。
+func ListenEndpoint(addr string, ep Endpoint) (*Node, error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
+		return nil, err
+	}
+	api, err := buildAPI(ep)
+	if err != nil {
 		return nil, err
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -39,9 +49,10 @@ func Listen(addr string) (*Node, error) {
 		return nil, err
 	}
 	node := &Node{
-		api:       NewAPI(),
+		api:       api,
 		secret:    secret,
 		base:      "http://" + ln.Addr().String(),
+		publicURL: strings.TrimRight(ep.PublicURL, "/"),
 		rooms:     map[string]*Room{},
 		bySession: map[string]string{},
 		sessionOf: map[string]string{},

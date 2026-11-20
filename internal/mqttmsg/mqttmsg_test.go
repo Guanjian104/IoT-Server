@@ -36,15 +36,18 @@ func TestCanonicalCommandsMatchProtocol(t *testing.T) {
 	if err != nil || string(gps) != `{"cmd":"gps_oneshot"}` {
 		t.Fatalf("gps = %s %v", gps, err)
 	}
-	call, err := CanonicalCommand("voice_call", &on, []byte(`{"channel":"936193","uid":1001,"token":"...","duration_min":15}`))
-	if err != nil || string(call) != `{"cmd":"voice_call","on":true,"params":{"channel":"936193","duration_min":15,"token":"...","uid":1001}}` {
+	call, err := CanonicalCommand("voice_call", &on, []byte(`{"whip_url":"http://203.0.113.5:18196/whip/pion-9030d6cb176c","token":"device-token","duration_min":15}`))
+	if err != nil || string(call) != `{"cmd":"voice_call","on":true,"params":{"duration_min":15,"token":"device-token","whip_url":"http://203.0.113.5:18196/whip/pion-9030d6cb176c"}}` {
 		t.Fatalf("call = %s %v", call, err)
 	}
 	if _, err := CanonicalCommand("find_light", &on, []byte(`{"freq_hz":2}`)); err == nil {
 		t.Fatal("bad freq accepted")
 	}
-	if _, err := CanonicalCommand("voice_call", &on, []byte(`{"channel":"936193"}`)); err == nil {
+	if _, err := CanonicalCommand("voice_call", &on, []byte(`{"whip_url":"http://203.0.113.5:18196/whip/pion-9030d6cb176c"}`)); err == nil {
 		t.Fatal("call without token accepted")
+	}
+	if _, err := CanonicalCommand("voice_call", &off, []byte(`{"token":"x"}`)); err == nil {
+		t.Fatal("hangup params accepted")
 	}
 	if _, err := CanonicalCommand("gps_oneshot", &off, nil); err == nil {
 		t.Fatal("oneshot off accepted")

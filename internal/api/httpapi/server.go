@@ -285,7 +285,11 @@ func (s *Server) createCommand(w http.ResponseWriter, r *http.Request) {
 		if !decode(w, r, &body) {
 			return
 		}
-		payload, err := mqttmsg.CanonicalCommand(body.Cmd, body.On, body.Params)
+		payload, peer, err := s.commandPayload(r.Context(), device.DeviceID, user.ID, body.Cmd, body.On, body.Params)
+		if errors.Is(err, errVoiceUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "unavailable")
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid")
 			return
@@ -300,12 +304,16 @@ func (s *Server) createCommand(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.log.Info("command queued", "request_id", requestID(r), "command_id", command.ID, "device_id", device.DeviceID, "msg_id", command.MsgID)
-		writeJSON(w, http.StatusAccepted, map[string]any{
+		response := map[string]any{
 			"command_id": command.ID,
 			"device_id":  command.DeviceID,
 			"msg_id":     command.MsgID,
 			"state":      command.State,
-		})
+		}
+		if peer != nil {
+			response["webrtc"] = peer
+		}
+		writeJSON(w, http.StatusAccepted, response)
 	})
 }
 

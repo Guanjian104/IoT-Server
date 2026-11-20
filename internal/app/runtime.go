@@ -85,7 +85,12 @@ func (rt *runtime) openSFU() error {
 	if rt.cfg.SFUAddr == "" {
 		return nil
 	}
-	node, err := sfu.Listen(rt.cfg.SFUAddr)
+	node, err := sfu.ListenEndpoint(rt.cfg.SFUAddr, sfu.Endpoint{
+		PublicIP:  rt.cfg.SFUPublicIP,
+		PublicURL: rt.cfg.SFUPublicURL,
+		UDPMin:    uint16(rt.cfg.SFUUDPMin),
+		UDPMax:    uint16(rt.cfg.SFUUDPMax),
+	})
 	if err != nil {
 		if rt.log != nil {
 			rt.log.Error("listen failed", "config_key", "IOT_SFU_ADDR")

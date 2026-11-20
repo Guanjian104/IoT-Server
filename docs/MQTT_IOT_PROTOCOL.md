@@ -135,19 +135,13 @@ Host `116.169.215.214:11883`，明文 MQTT；账号见配置宏。
 
 ### CMD-09 · `voice_call`（项圈语音通话）
 
-**功能**：App 与项圈经蜂窝网络做实时双向语音（声网 RTC）；设备打开麦克与扬声器并加入频道。  
+**功能**：App 与项圈经蜂窝网络做实时双向语音。媒体走本进程的 WebRTC SFU。  
 **场景**：远程对宠说话 / 听环境声。  
-**行为**：`on:true` 携带 `channel`/`uid`/`token` 发起加入；须区分「指令已受理 `accepted`」与「声网实际接通」（见通话状态）；超时、`on:false` 或失败则挂断并解除音频占用。  
-**params**：`channel`、`uid`、`token`、`duration_min`(1–60，默认 15)。
+**行为**：`on:true` 携带 `whip_url` 和 `token`，设备用 WHIP 加入；`accepted` 只表示指令已受理。超时、`on:false` 或失败则挂断并解除音频占用。  
+**params**：`whip_url`、`token`、`duration_min`(1–60，可选)。交换顺序见 `docs/WebRTC设备对接.md`。
 
 ```json
-{"cmd":"voice_call","on":true,"params":{"channel":"936193","uid":1001,"token":"...","duration_min":15}}
-```
-
-兼容旧格式（等价本命令）：
-
-```json
-{"data":{"agora_call":true,"channel":"936193","uid":1001,"token":"..."}}
+{"cmd":"voice_call","on":true,"params":{"whip_url":"http://203.0.113.5:18196/whip/pion-9030d6cb176c","token":"...","duration_min":15}}
 ```
 
 ### 命令一览
@@ -162,7 +156,7 @@ Host `116.169.215.214:11883`，明文 MQTT；账号见配置宏。
 | CMD-06 | `activate` | 激活并启动 GPS/IMU |
 | CMD-07 | `mic_record` | 按时长录音 |
 | CMD-08 | `speaker_play` | 播放内置预设音 |
-| CMD-09 | `voice_call` | 声网双向语音通话 |
+| CMD-09 | `voice_call` | 本进程 WebRTC 双向语音 |
 
 ## 4. 上行 telemetry（按 type）
 
@@ -229,7 +223,7 @@ Host `116.169.215.214:11883`，明文 MQTT；账号见配置宏。
 ```
 
 ```json
-{"cmd":"voice_call","on":true,"params":{"channel":"936193","uid":1001,"token":"..."}}
+{"cmd":"voice_call","on":false}
 ```
 
 ```json

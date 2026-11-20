@@ -292,11 +292,10 @@ func CanonicalCommand(cmd string, on *bool, raw json.RawMessage) ([]byte, error)
 			return nil, errCommand
 		}
 	case "voice_call":
-		if on == nil {
+		if on == nil || !*on && len(params) > 0 {
 			return nil, errCommand
 		}
-		required := on != nil && *on
-		if takeString(params, out, "channel", required) != nil || takeRange(params, out, "uid", required, 0, 1<<31-1) != nil || takeString(params, out, "token", required) != nil || takeRange(params, out, "duration_min", false, 1, 60) != nil {
+		if *on && (takeText(params, out, "whip_url", true, 512) != nil || takeText(params, out, "token", true, 512) != nil || takeRange(params, out, "duration_min", false, 1, 60) != nil) {
 			return nil, errCommand
 		}
 	default:
@@ -381,6 +380,10 @@ func takeInt(params map[string]json.RawMessage, key string, required bool) (int6
 }
 
 func takeString(params map[string]json.RawMessage, out map[string]any, key string, required bool) error {
+	return takeText(params, out, key, required, 128)
+}
+
+func takeText(params map[string]json.RawMessage, out map[string]any, key string, required bool, max int) error {
 	raw, ok := params[key]
 	if !ok {
 		if required {
@@ -390,7 +393,7 @@ func takeString(params map[string]json.RawMessage, out map[string]any, key strin
 	}
 	delete(params, key)
 	var text string
-	if err := json.Unmarshal(raw, &text); err != nil || text == "" || len(text) > 128 {
+	if err := json.Unmarshal(raw, &text); err != nil || text == "" || len(text) > max {
 		return errCommand
 	}
 	out[key] = text

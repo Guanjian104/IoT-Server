@@ -128,9 +128,13 @@ func (p *Provider) SubscribeURL(resourceID string) string {
 	return p.node.base + "/whep/" + resourceID
 }
 
-// PublishURL 是发布端提交 offer 的地址。
+// PublishURL 是发布端提交 offer 的地址。配置了公网基址时，返回给设备的是这个基址。
 func (p *Provider) PublishURL(resourceID string) string {
-	return p.node.base + "/whip/" + resourceID
+	base := p.node.base
+	if p.node.publicURL != "" {
+		base = p.node.publicURL
+	}
+	return base + "/whip/" + resourceID
 }
 
 func resourceID(sessionID string) (string, error) {

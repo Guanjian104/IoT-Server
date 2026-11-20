@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -150,7 +151,56 @@ func finish(cfg Config, values map[string]string) (Config, error) {
 	if cfg.RingTimeout, err = boundedDuration(values["IOT_CALL_RING_TIMEOUT"], 30*time.Second, time.Second, 2*time.Minute, "IOT_CALL_RING_TIMEOUT"); err != nil {
 		return Config{}, err
 	}
+	public, publicOn, err := requireGroup(values, "IOT_SFU_PUBLIC_IP", "IOT_SFU_PUBLIC_URL", "IOT_SFU_UDP_MIN", "IOT_SFU_UDP_MAX")
+	if err != nil {
+		return Config{}, err
+	}
+	if publicOn {
+		if cfg.SFUAddr == "" || !publicIPv4(public["IOT_SFU_PUBLIC_IP"]) || !publicSFUURL(public["IOT_SFU_PUBLIC_URL"], public["IOT_SFU_PUBLIC_IP"]) {
+			return Config{}, errors.New("invalid IOT_SFU_PUBLIC_IP")
+		}
+		minPort, maxPort, err := udpRange(public["IOT_SFU_UDP_MIN"], public["IOT_SFU_UDP_MAX"])
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.SFUPublicIP = public["IOT_SFU_PUBLIC_IP"]
+		cfg.SFUPublicURL = strings.TrimRight(public["IOT_SFU_PUBLIC_URL"], "/")
+		cfg.SFUUDPMin = minPort
+		cfg.SFUUDPMax = maxPort
+	}
 	return cfg, nil
+}
+
+func publicIPv4(value string) bool {
+	ip := net.ParseIP(value)
+	return ip != nil && ip.To4() != nil && ip.IsGlobalUnicast() && !ip.IsPrivate()
+}
+
+func publicSFUURL(raw, ip string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		return false
+	}
+	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil || host == "" || port == "" || loopbackHost(host) {
+		return false
+	}
+	if parsedIP := net.ParseIP(host); parsedIP != nil && parsedIP.String() != ip {
+		return false
+	}
+	return true
+}
+
+func udpRange(minRaw, maxRaw string) (int, int, error) {
+	minPort, errMin := strconv.Atoi(minRaw)
+	maxPort, errMax := strconv.Atoi(maxRaw)
+	if errMin != nil || errMax != nil || minPort < 1024 || maxPort > 65535 || minPort > maxPort || minPort <= 40063 && maxPort >= 40000 {
+		return 0, 0, errors.New("invalid IOT_SFU_UDP_MIN")
+	}
+	return minPort, maxPort, nil
 }
 
 func boundedDuration(raw string, fallback, min, max time.Duration, key string) (time.Duration, error) {

@@ -57,10 +57,40 @@ type forwardTrack struct {
 
 // NewAPI 创建只走本机 IPv4、关闭 mDNS 的 WebRTC API。房间和测试端点共用它。
 func NewAPI() *webrtc.API {
+	api, err := buildAPI(Endpoint{})
+	if err != nil {
+		panic(err)
+	}
+	return api
+}
+
+// Endpoint 是设备从公网加入时使用的地址。留空时候选地址仍是本机 IPv4。
+type Endpoint struct {
+	PublicIP  string
+	PublicURL string
+	UDPMin    uint16
+	UDPMax    uint16
+}
+
+func buildAPI(ep Endpoint) (*webrtc.API, error) {
 	var settings webrtc.SettingEngine
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-	return webrtc.NewAPI(webrtc.WithSettingEngine(settings))
+	if ep.UDPMin != 0 || ep.UDPMax != 0 {
+		if err := settings.SetEphemeralUDPPortRange(ep.UDPMin, ep.UDPMax); err != nil {
+			return nil, err
+		}
+	}
+	if ep.PublicIP != "" {
+		if err := settings.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
+			External:        []string{ep.PublicIP},
+			AsCandidateType: webrtc.ICECandidateTypeHost,
+			Mode:            webrtc.ICEAddressRewriteReplace,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return webrtc.NewAPI(webrtc.WithSettingEngine(settings)), nil
 }
 
 // NewRoom 创建空房间。onOffer 在需要重新协商时被调用，且不会持有房间锁。
