@@ -1,6 +1,45 @@
+.DS_Store
 /bin/
 /dist/
 *.out
 *.test
 .env
 deployments/local/
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.a
+
+# Test binary built with `go test -c`
+*.test
+
+# Coverage
+*.coverprofile
+coverage.out
+coverage.txt
+profile.cov
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
