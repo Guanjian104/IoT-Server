@@ -246,6 +246,8 @@ func ecoIoTPublish(topic string) bool {
 		return true
 	case len(parts) == 4 && parts[0] == "device" && parts[2] == "archive" && parts[3] == "clear" && parts[1] != "":
 		return true
+	case len(parts) == 5 && parts[0] == "pet" && parts[1] == "collar" && parts[4] == "cmd" && (parts[2] == Model10Pro || parts[2] == Model20Test) && ValidDeviceID(parts[3]):
+		return true
 	default:
 		return false
 	}

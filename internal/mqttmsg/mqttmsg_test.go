@@ -153,8 +153,11 @@ func TestAccessMatrix(t *testing.T) {
 		{"eco-iot", "", "", "publish", "device/9030d6cb176c/cmd", "allow"},
 		{"eco-iot", "", "", "publish", "device/cmd/petcollar/9030d6cb176c", "allow"},
 		{"eco-iot", "", "", "publish", "device/9030d6cb176c/archive/clear", "allow"},
-		{"eco-iot", "", "", "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
-		{"eco-iot", "", "", "publish", "pet/collar/2_0_test/9030d6cb176c/cmd", "deny"},
+		{"eco-iot", "", "", "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "allow"},
+		{"eco-iot", "", "", "publish", "pet/collar/2_0_test/9030d6cb176c/cmd", "allow"},
+		{"eco-iot", "", "", "publish", "pet/collar/1_0pro/+/cmd", "deny"},
+		{"eco-iot", "", "", "publish", "pet/collar/1_0pro/9030D6CB176C/cmd", "deny"},
+		{"eco-iot", "", "", "publish", "pet/collar/watch/9030d6cb176c/cmd", "deny"},
 		{"eco-iot", "", "", "publish", "device/+/cmd", "deny"},
 		{"eco-iot", "", "", "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
 	}
