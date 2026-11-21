@@ -12,7 +12,7 @@ import (
 )
 
 func TestWatchCredentialStaysTestWithoutProvider(t *testing.T) {
-	api := New(nil, nil, nil, "dev", "", "", "", time.Second, nil)
+	api := New(nil, nil, nil, "dev", "", "", "", "", time.Second, nil)
 	body, err := api.watchCredential(context.Background(), store.WatchResult{Credential: "stored-viewer-token"})
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestWatchCredentialUsesPion(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = node.Close() })
-	api := New(nil, nil, nil, "dev", "", "", "", time.Second, nil)
+	api := New(nil, nil, nil, "dev", "", "", "", "", time.Second, nil)
 	api.UseMedia(node.Media())
 	body, err := api.watchCredential(context.Background(), store.WatchResult{
 		SessionID:  "s0011223344556677",

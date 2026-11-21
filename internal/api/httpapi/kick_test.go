@@ -18,7 +18,7 @@ func (f kickerFunc) Kick(ctx context.Context, clientID string) error {
 
 func TestKickResultIsVisible(t *testing.T) {
 	collected := metrics.New("dev", "none", "instance")
-	server := New(nil, nil, collected, "dev", "", "", "", time.Second, kickerFunc(func(context.Context, string) error {
+	server := New(nil, nil, collected, "dev", "", "", "", "", time.Second, kickerFunc(func(context.Context, string) error {
 		return errors.New("kick failed")
 	}))
 	if server.kick(context.Background(), "abc123abc123") != "failed" {

@@ -8,7 +8,7 @@ import (
 )
 
 func TestInternalRoutesStayOffTheBusinessListener(t *testing.T) {
-	api := New(nil, nil, nil, "dev", "hook-token", "", "", time.Second, nil)
+	api := New(nil, nil, nil, "dev", "hook-token", "", "", "", time.Second, nil)
 	public := http.NewServeMux()
 	api.Register(public)
 	hook := http.NewServeMux()

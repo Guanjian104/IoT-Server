@@ -145,6 +145,18 @@ func TestAccessMatrix(t *testing.T) {
 		{"service", "", "", "subscribe", "#", "deny"},
 		{"app", "", "", "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
 		{"unknown", "", "", "publish", "pet/collar/1_0pro/9030d6cb176c/state", "deny"},
+		{"eco-iot", "", "", "subscribe", "pet/collar/1_0pro/+/state", "allow"},
+		{"eco-iot", "", "", "subscribe", "pet/collar/2_0_test/+/state", "allow"},
+		{"eco-iot", "", "", "subscribe", "device/+/status", "allow"},
+		{"eco-iot", "", "", "subscribe", "cat/event", "allow"},
+		{"eco-iot", "", "", "subscribe", "$share/iot-dev/pet/collar/1_0pro/+/state", "deny"},
+		{"eco-iot", "", "", "publish", "device/9030d6cb176c/cmd", "allow"},
+		{"eco-iot", "", "", "publish", "device/cmd/petcollar/9030d6cb176c", "allow"},
+		{"eco-iot", "", "", "publish", "device/9030d6cb176c/archive/clear", "allow"},
+		{"eco-iot", "", "", "publish", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
+		{"eco-iot", "", "", "publish", "pet/collar/2_0_test/9030d6cb176c/cmd", "deny"},
+		{"eco-iot", "", "", "publish", "device/+/cmd", "deny"},
+		{"eco-iot", "", "", "subscribe", "pet/collar/1_0pro/9030d6cb176c/cmd", "deny"},
 	}
 	for _, tc := range cases {
 		if got := Decide(tc.kind, tc.device, tc.model, tc.action, tc.topic); got != tc.want {
@@ -168,6 +180,10 @@ func TestClassifyKeepsAppAwayFromRoot(t *testing.T) {
 	}
 	kind, _ = Classify("root", "iot-dev-service-a")
 	if kind != "unknown" {
+		t.Fatal(kind)
+	}
+	kind, _ = Classify("eco-iot", "eco-iot-104445")
+	if kind != "eco-iot" {
 		t.Fatal(kind)
 	}
 	if SameSecret("alpha", "beta") || !SameSecret("alpha", "alpha") || SameSecret("alpha", "") {

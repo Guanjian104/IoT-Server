@@ -32,6 +32,7 @@ func (c Config) Secrets() []string {
 		c.MQTTServicePass,
 		c.MQTTDevicePass,
 		c.MQTTHookToken,
+		c.EcoIoTMQTTPassword,
 		c.EMQXAPIPassword,
 		c.SeedAdminPass,
 		c.SeedOperatorPass,
@@ -140,6 +141,7 @@ func finish(cfg Config, values map[string]string) (Config, error) {
 		cfg.EMQXAPIPassword = mqtt["IOT_EMQX_API_PASSWORD"]
 		cfg.mqttEnabled = true
 	}
+	cfg.EcoIoTMQTTPassword = strings.TrimSpace(values["IOT_ECO_IOT_MQTT_PASSWORD"])
 	cfg.SeedAdminPass = strings.TrimSpace(values["IOT_SEED_ADMIN_PASSWORD"])
 	cfg.SeedOperatorPass = strings.TrimSpace(values["IOT_SEED_OPERATOR_PASSWORD"])
 	if cfg.StopDelay, err = boundedDuration(values["IOT_STOP_DELAY"], 30*time.Second, time.Second, 2*time.Minute, "IOT_STOP_DELAY"); err != nil {

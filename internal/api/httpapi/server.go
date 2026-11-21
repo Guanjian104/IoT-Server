@@ -34,6 +34,7 @@ type Server struct {
 	hookToken       string
 	servicePassword string
 	devicePassword  string
+	ecoIoTPassword  string
 	deadline        time.Duration
 	kicker          Kicker
 	media           media.Provider
@@ -48,7 +49,7 @@ func (s *Server) UseMedia(p media.Provider) {
 }
 
 // New 组装接口。
-func New(st *store.Store, log logger.Logger, m *metrics.Metrics, tenant, hookToken, servicePassword, devicePassword string, deadline time.Duration, kicker Kicker) *Server {
+func New(st *store.Store, log logger.Logger, m *metrics.Metrics, tenant, hookToken, servicePassword, devicePassword, ecoIoTPassword string, deadline time.Duration, kicker Kicker) *Server {
 	if deadline <= 0 {
 		deadline = 5 * time.Second
 	}
@@ -60,6 +61,7 @@ func New(st *store.Store, log logger.Logger, m *metrics.Metrics, tenant, hookTok
 		hookToken:       hookToken,
 		servicePassword: servicePassword,
 		devicePassword:  devicePassword,
+		ecoIoTPassword:  ecoIoTPassword,
 		deadline:        deadline,
 		kicker:          kicker,
 	}

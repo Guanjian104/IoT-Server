@@ -44,6 +44,7 @@ type Config struct {
 	MQTTDeviceUser     string
 	MQTTDevicePass     string
 	MQTTHookToken      string
+	EcoIoTMQTTPassword string
 	EMQXAPIURL         string
 	EMQXAPIUser        string
 	EMQXAPIPassword    string
@@ -85,6 +86,7 @@ var knownKeys = []string{
 	"IOT_MQTT_DEVICE_USERNAME",
 	"IOT_MQTT_DEVICE_PASSWORD",
 	"IOT_MQTT_HOOK_TOKEN",
+	"IOT_ECO_IOT_MQTT_PASSWORD",
 	"IOT_EMQX_API_URL",
 	"IOT_EMQX_API_USER",
 	"IOT_EMQX_API_PASSWORD",

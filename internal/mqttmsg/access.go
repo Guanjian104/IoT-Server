@@ -10,6 +10,7 @@ import (
 const (
 	ServiceUsername = "iot-dev-service"
 	DeviceUsername  = "root"
+	EcoUsername     = "eco-iot"
 	ShareGroup      = "iot-dev"
 )
 
@@ -20,6 +21,8 @@ func Classify(username, clientID string) (kind, deviceID string) {
 		return "service", ""
 	case username == DeviceUsername && ValidDeviceID(clientID):
 		return "device", clientID
+	case username == EcoUsername:
+		return "eco-iot", ""
 	case strings.HasPrefix(username, "app:"):
 		return "app", ""
 	default:
@@ -114,6 +117,8 @@ func Decide(kind, deviceID, model, action, topic string) string {
 		return decideDevice(deviceID, model, action, topic)
 	case "service":
 		return decideService(action, topic)
+	case "eco-iot":
+		return decideEcoIoT(action, topic)
 	default:
 		return "deny"
 	}
@@ -189,6 +194,60 @@ func ServiceFilters() []string {
 		"$share/" + ShareGroup + "/pet/collar/" + Model20Test + "/+/state",
 		"$SYS/brokers/+/clients/+/connected",
 		"$SYS/brokers/+/clients/+/disconnected",
+	}
+}
+
+// ecoIoTSubscribeFilters 是 eco-iot 进程当前的订阅。
+// 不含项圈 cmd，也不使用 iot-dev-service 的共享订阅。
+func ecoIoTSubscribeFilters() []string {
+	return []string{
+		"cat/event",
+		"device/+/ack",
+		"device/+/archive",
+		"device/+/enter",
+		"device/+/leave",
+		"device/+/scene",
+		"device/+/status",
+		"device/+/telemetry",
+		"device/event/petcollar/+",
+		"device/telemetry/petcollar/v2/+",
+		"horse/collar/+/state",
+		"pet/collar/+/state",
+		"pet/collar/" + Model10Pro + "/+/state",
+		"pet/collar/" + Model20Test + "/+/state",
+	}
+}
+
+func decideEcoIoT(action, topic string) string {
+	switch action {
+	case "subscribe":
+		for _, filter := range ecoIoTSubscribeFilters() {
+			if topic == filter {
+				return "allow"
+			}
+		}
+	case "publish":
+		if strings.ContainsAny(topic, "#+") {
+			return "deny"
+		}
+		if ecoIoTPublish(topic) {
+			return "allow"
+		}
+	}
+	return "deny"
+}
+
+func ecoIoTPublish(topic string) bool {
+	parts := strings.Split(topic, "/")
+	switch {
+	case len(parts) == 3 && parts[0] == "device" && parts[2] == "cmd" && parts[1] != "":
+		return true
+	case len(parts) == 4 && parts[0] == "device" && parts[1] == "cmd" && parts[2] == "petcollar" && parts[3] != "":
+		return true
+	case len(parts) == 4 && parts[0] == "device" && parts[2] == "archive" && parts[3] == "clear" && parts[1] != "":
+		return true
+	default:
+		return false
 	}
 }
 

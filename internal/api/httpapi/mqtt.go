@@ -36,6 +36,11 @@ func (s *Server) mqttAuth(w http.ResponseWriter, r *http.Request) {
 			writeDecision(w, "allow")
 			return
 		}
+	case "eco-iot":
+		if mqttmsg.SameSecret(body.Password, s.ecoIoTPassword) {
+			writeDecision(w, "allow")
+			return
+		}
 	case "device":
 		if !mqttmsg.SameSecret(body.Password, s.devicePassword) {
 			break

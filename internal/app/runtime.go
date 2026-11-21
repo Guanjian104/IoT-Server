@@ -127,7 +127,7 @@ func (rt *runtime) api() *httpapi.Server {
 	if rt == nil || rt.store == nil {
 		return nil
 	}
-	api := httpapi.New(rt.store, rt.log, rt.metrics, rt.cfg.TenantID, rt.cfg.MQTTHookToken, rt.cfg.MQTTServicePass, rt.cfg.MQTTDevicePass, rt.cfg.CommandDeadline, rt.kicker)
+	api := httpapi.New(rt.store, rt.log, rt.metrics, rt.cfg.TenantID, rt.cfg.MQTTHookToken, rt.cfg.MQTTServicePass, rt.cfg.MQTTDevicePass, rt.cfg.EcoIoTMQTTPassword, rt.cfg.CommandDeadline, rt.kicker)
 	if rt.sfu != nil {
 		api.UseMedia(rt.sfu.Media())
 	}
