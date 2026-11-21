@@ -85,7 +85,7 @@ services:
       EMQX_NODE__COOKIE: ${EMQX_NODE_COOKIE:?set EMQX_NODE_COOKIE}
       EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DEV_DASHBOARD_PASSWORD:?set EMQX_DEV_DASHBOARD_PASSWORD}
     ports:
-      - "0.0.0.0:11884:1883"
+      - "0.0.0.0:11883:1883"
       - "127.0.0.1:18083:18083"
     volumes:
       - eco-device-emqx:/opt/emqx/data
