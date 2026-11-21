@@ -59,7 +59,7 @@ Content-Type: application/sdp
 <offer SDP>
 ```
 
-成功时返回 201，正文是 `application/sdp` 的 answer。把它设为远端描述。answer 里的主机候选地址是 `120.25.100.77`，端口落在 `40100–40131`。同一身份重复加入返回 409。凭证过期、房间不对或角色不是发布，返回 401。
+成功时返回 201，正文是 `application/sdp` 的 answer。把它设为远端描述。answer 里的主机候选地址是 `120.25.100.77`，端口落在 `40100–40131`。同一身份再次 POST 会关掉上一轮连接并返回新的 answer。凭证过期、房间不对或角色不是发布，返回 401。两次加入叠在一起时返回 409。
 
 要听对端时，再向同一个 `whip_url` 发 `GET`，请求头仍是 `Authorization: Bearer <token>`。对方的音频进入房间后，响应 200，正文是新的 offer，最多等待 10 秒。没有新 offer 时返回 204。设备用这个 offer 生成 answer，再 `PUT` 同一个地址，正文是 `Content-Type: application/sdp` 的 answer。成功返回 204。第一轮 answer 不会新增媒体行，所以听对方必须完成这一轮。
 

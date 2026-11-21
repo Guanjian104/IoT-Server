@@ -44,6 +44,9 @@ type peer struct {
 	signal      sync.Mutex
 	established bool
 	dirty       bool
+	life        sync.Mutex
+	stopped     bool
+	done        chan struct{}
 	neg         chan struct{}
 }
 
@@ -129,6 +132,7 @@ func delivers(to, from string) bool {
 }
 
 // Join 为成员建立 SFU 侧的 PeerConnection。发布端随后用 HandleOffer 把轨道送进来。
+// 同一身份再次加入时关掉上一轮连接，避免 DTLS 失败后的残留把重试拒成 409。
 func (r *Room) Join(id string) error {
 	if id == "" {
 		return errors.New("peer id is empty")
@@ -137,7 +141,19 @@ func (r *Room) Join(id string) error {
 	if err != nil {
 		return err
 	}
-	member := &peer{id: id, pc: pc, neg: make(chan struct{}, 1)}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		_ = pc.Close()
+		return errRoomClosed
+	}
+	previous := r.peers[id]
+	r.mu.Unlock()
+	if previous != nil {
+		r.release(previous)
+	}
+
+	member := &peer{id: id, pc: pc, done: make(chan struct{}), neg: make(chan struct{}, 1)}
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -165,6 +181,11 @@ func (r *Room) Join(id string) error {
 	r.peers[id] = member
 	r.mu.Unlock()
 
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateFailed {
+			r.release(member)
+		}
+	})
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		r.forward(id, track)
 	})
@@ -340,17 +361,25 @@ func (r *Room) pump(ctx context.Context, remote *webrtc.TrackRemote, local *webr
 	}
 }
 
-func (r *Room) offer(id string) {
-	member, err := r.member(id)
-	if err != nil {
+func (r *Room) offer(member *peer) {
+	r.mu.Lock()
+	current := r.peers[member.id]
+	closed := r.closed
+	r.mu.Unlock()
+	if closed || current != member {
 		return
+	}
+	select {
+	case <-member.done:
+		return
+	default:
 	}
 	member.signal.Lock()
 	if !member.established || !member.dirty || member.pc.SignalingState() != webrtc.SignalingStateStable {
 		retry := member.established && member.dirty
 		member.signal.Unlock()
 		if retry {
-			time.AfterFunc(25*time.Millisecond, func() { r.requestNegotiation(id) })
+			time.AfterFunc(25*time.Millisecond, func() { r.requestNegotiation(member.id) })
 		}
 		return
 	}
@@ -376,7 +405,7 @@ func (r *Room) offer(id string) {
 	}
 	local := pc.LocalDescription()
 	if local != nil && r.onOffer != nil {
-		r.onOffer(id, *local)
+		r.onOffer(member.id, *local)
 	}
 }
 
@@ -397,12 +426,47 @@ func (r *Room) requestNegotiation(id string) {
 func (r *Room) Remove(id string) error {
 	r.mu.Lock()
 	member := r.peers[id]
-	delete(r.peers, id)
 	r.mu.Unlock()
 	if member == nil {
 		return nil
 	}
-	return member.pc.Close()
+	r.release(member)
+	return nil
+}
+
+// release 停掉这个成员自己的协商循环，并卸下它发布的轨道。
+// 只有映射里仍是这一份连接时才从房间删除，避免关掉已被替换的旧连接时误删新连接。
+func (r *Room) release(member *peer) {
+	if member == nil {
+		return
+	}
+	member.stop()
+	r.mu.Lock()
+	var stale []*forwardTrack
+	if r.peers[member.id] == member {
+		delete(r.peers, member.id)
+		for key, track := range r.tracks {
+			if track.publisherID == member.id {
+				stale = append(stale, track)
+				delete(r.tracks, key)
+			}
+		}
+	}
+	r.mu.Unlock()
+	for _, track := range stale {
+		track.cancel()
+	}
+	_ = member.pc.Close()
+}
+
+func (p *peer) stop() {
+	p.life.Lock()
+	defer p.life.Unlock()
+	if p.stopped {
+		return
+	}
+	p.stopped = true
+	close(p.done)
 }
 
 func (r *Room) joined(id string) bool {
@@ -458,8 +522,10 @@ func (p *peer) loop(r *Room) {
 		select {
 		case <-r.ctx.Done():
 			return
+		case <-p.done:
+			return
 		case <-p.neg:
-			r.offer(p.id)
+			r.offer(p)
 		}
 	}
 }

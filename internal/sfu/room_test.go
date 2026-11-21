@@ -167,6 +167,33 @@ func connect(t *testing.T, client *webrtc.PeerConnection, room *Room, id string)
 	}
 }
 
+func TestJoinReplacesSameIdentity(t *testing.T) {
+	room, err := NewRoom("room-rejoin", NewAPI(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = room.Close() })
+	const device = "call:9030d6cb2703"
+	if err := room.Join(device); err != nil {
+		t.Fatal(err)
+	}
+	if err := room.Join("call:u7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := room.Join(device); err != nil {
+		t.Fatal(err)
+	}
+	if !room.joined(device) || !room.joined("call:u7") {
+		t.Fatal("replacement removed the other peer or the new one")
+	}
+	room.mu.Lock()
+	count := len(room.peers)
+	room.mu.Unlock()
+	if count != 2 {
+		t.Fatalf("peers = %d", count)
+	}
+}
+
 func waitConnected(t *testing.T, pc *webrtc.PeerConnection) {
 	t.Helper()
 	if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
