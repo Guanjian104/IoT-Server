@@ -116,6 +116,10 @@ func finish(cfg Config, values map[string]string) (Config, error) {
 		cfg.RedisPassword = redis["IOT_REDIS_PASSWORD"]
 		cfg.redisEnabled = true
 	}
+	clientOn, err := mqttClientWanted(values["IOT_MQTT_CLIENT"])
+	if err != nil {
+		return Config{}, err
+	}
 	if mqttOn {
 		if err := validateBroker(mqtt["IOT_MQTT_BROKER_URL"]); err != nil {
 			return Config{}, err
@@ -130,16 +134,18 @@ func finish(cfg Config, values map[string]string) (Config, error) {
 		if !loopbackHost(host) {
 			return Config{}, errors.New("invalid IOT_HTTP_ADDR")
 		}
-		cfg.MQTTBrokerURL = mqtt["IOT_MQTT_BROKER_URL"]
-		cfg.MQTTServiceUser = mqtt["IOT_MQTT_SERVICE_USERNAME"]
-		cfg.MQTTServicePass = mqtt["IOT_MQTT_SERVICE_PASSWORD"]
-		cfg.MQTTDeviceUser = mqtt["IOT_MQTT_DEVICE_USERNAME"]
-		cfg.MQTTDevicePass = mqtt["IOT_MQTT_DEVICE_PASSWORD"]
 		cfg.MQTTHookToken = mqtt["IOT_MQTT_HOOK_TOKEN"]
-		cfg.EMQXAPIURL = mqtt["IOT_EMQX_API_URL"]
-		cfg.EMQXAPIUser = mqtt["IOT_EMQX_API_USER"]
-		cfg.EMQXAPIPassword = mqtt["IOT_EMQX_API_PASSWORD"]
-		cfg.mqttEnabled = true
+		if clientOn {
+			cfg.MQTTBrokerURL = mqtt["IOT_MQTT_BROKER_URL"]
+			cfg.MQTTServiceUser = mqtt["IOT_MQTT_SERVICE_USERNAME"]
+			cfg.MQTTServicePass = mqtt["IOT_MQTT_SERVICE_PASSWORD"]
+			cfg.MQTTDeviceUser = mqtt["IOT_MQTT_DEVICE_USERNAME"]
+			cfg.MQTTDevicePass = mqtt["IOT_MQTT_DEVICE_PASSWORD"]
+			cfg.EMQXAPIURL = mqtt["IOT_EMQX_API_URL"]
+			cfg.EMQXAPIUser = mqtt["IOT_EMQX_API_USER"]
+			cfg.EMQXAPIPassword = mqtt["IOT_EMQX_API_PASSWORD"]
+			cfg.mqttEnabled = true
+		}
 	}
 	cfg.EcoIoTMQTTPassword = strings.TrimSpace(values["IOT_ECO_IOT_MQTT_PASSWORD"])
 	cfg.SeedAdminPass = strings.TrimSpace(values["IOT_SEED_ADMIN_PASSWORD"])
@@ -215,6 +221,17 @@ func boundedDuration(raw string, fallback, min, max time.Duration, key string) (
 		return 0, fmt.Errorf("invalid %s", key)
 	}
 	return parsed, nil
+}
+
+func mqttClientWanted(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "on", "true", "1":
+		return true, nil
+	case "off", "false", "0":
+		return false, nil
+	default:
+		return false, errors.New("invalid IOT_MQTT_CLIENT")
+	}
 }
 
 func requireGroup(values map[string]string, keys ...string) (map[string]string, bool, error) {

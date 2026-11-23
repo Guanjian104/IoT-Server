@@ -17,6 +17,27 @@ for value in "$EMQX_NODE_COOKIE" "$EMQX_DEV_DASHBOARD_PASSWORD"; do
 done
 mkdir -p deployments/local
 umask 077
+collar_auth=""
+if [ -n "${IOT_COLLAR_CLIENT_ID:-}" ]; then
+  printf '%s\n' "$IOT_COLLAR_CLIENT_ID" | grep -Eq '^[0-9a-f]{12}$' || {
+    echo "invalid IOT_COLLAR_CLIENT_ID" >&2
+    exit 1
+  }
+  collar_auth=$(cat <<RULE
+  {
+    mechanism = cinfo
+    precondition = "str_eq(username, 'root')"
+    checks = [
+      {
+        is_match = "not str_eq(clientid, '${IOT_COLLAR_CLIENT_ID}')"
+        result = deny
+      }
+    ]
+    enable = true
+  },
+RULE
+)
+fi
 cat > deployments/local/emqx.conf <<EOF
 node {
   name = "emqx@127.0.0.1"
@@ -70,7 +91,7 @@ authentication_settings {
 }
 
 authentication = [
-  {
+${collar_auth}  {
     mechanism = password_based
     backend = built_in_database
     user_id_type = username
