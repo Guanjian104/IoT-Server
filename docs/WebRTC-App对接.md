@@ -1,6 +1,6 @@
 # App WebRTC 通话对接
 
-App 和一台项圈在同一间 SFU 房间里互发音频。媒体是 UDP 上的 RTP。App 不连接 EMQX。
+App 和一台项圈在同一间 SFU 房间里互发音频。媒体是 UDP 上的 RTP。App 不连接 EMQX。这一份给 APP 客户端。现有项圈页不提供通话入口。
 
 下面的地址是 cs 联调使用的一组值。
 
@@ -13,23 +13,22 @@ App 和一台项圈在同一间 SFU 房间里互发音频。媒体是 UDP 上的
 
 ## 1. 拿到本次凭证
 
-下发开启命令：
+下发开启命令打到 App 服务，不打 Device-Server。`{deviceId}` 用绑定返回的设备号。
 
-`POST /api/v1/devices/{mac}/commands`
+`POST /api/v1/devices/{deviceId}/command`
 
 ```json
-{"cmd":"voice_call","on":true,"params":{"duration_min":15}}
+{"command":"voice_call","params_json":"{\"on\":true,\"duration_min\":15}"}
 ```
 
-`{mac}` 是 12 位小写 MAC。`duration_min` 可省略；出现时是 1–60，只写给设备，不写进 App 的凭证。
+`duration_min` 可省略；出现时是 1–60，只写给设备，不写进 App 的凭证。
 
-成功时 HTTP 202：
+成功时 HTTP 200，`code` 为 `0`：
 
 ```json
 {
-  "command_id": "cmd-480ea22e26f0084c",
-  "device_id": "9030d6cb2703",
-  "state": "pending",
+  "accepted": true,
+  "vendor_message_id": "pet/collar/1_0pro/9030d6cb2703/cmd",
   "webrtc": {
     "whip_url": "http://120.25.100.77:18196/whip/pion-9030d6cb2703",
     "token": "<App 凭证>",
@@ -46,15 +45,15 @@ App 和一台项圈在同一间 SFU 房间里互发音频。媒体是 UDP 上的
 
 设备的凭证在 MQTT 的 `cmd` 里，身份是 `call:{mac}`。两张凭证不同。App 只用 `webrtc` 里的这一张，不订阅 `cmd`，也不使用 Device-Server 的登录令牌去访问 WHIP。
 
-`state` 后来变成 `accepted`，只表示设备受理了命令，不表示音频已经接通。202 一返回就可以开始第 2 节。没有公网 SFU 时，这个接口返回 503，正文没有 `webrtc`。
+响应一返回就可以开始第 2 节。设备随后在 `state` 上的 `accepted` 只表示命令已受理，不表示音频已经接通。没有公网 SFU 时，这次命令失败，正文没有 `webrtc`。
 
-挂断另发一条，没有 `params`：
+挂断另发一条：
 
 ```json
-{"cmd":"voice_call","on":false}
+{"command":"voice_call","params_json":"{\"on\":false}"}
 ```
 
-发出后关闭本端 PeerConnection。
+发出后关闭本端 PeerConnection。响应里没有 `webrtc`。
 
 ## 2. 用 WHIP 加入
 

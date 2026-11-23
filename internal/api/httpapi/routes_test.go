@@ -22,6 +22,9 @@ func TestInternalRoutesStayOffTheBusinessListener(t *testing.T) {
 	if status(public, http.MethodPost, "/internal/media/events") != http.StatusNotFound {
 		t.Fatal("business listener exposed media events")
 	}
+	if status(public, http.MethodPost, "/internal/calls") != http.StatusNotFound {
+		t.Fatal("business listener exposed call issuing")
+	}
 	if status(public, http.MethodPut, "/internal/rtc/plan") != http.StatusNotFound {
 		t.Fatal("business listener exposed the test plan")
 	}
@@ -33,6 +36,9 @@ func TestInternalRoutesStayOffTheBusinessListener(t *testing.T) {
 	}
 	if status(hook, http.MethodPost, "/internal/media/events") != http.StatusUnauthorized {
 		t.Fatal("media callback skipped the hook token")
+	}
+	if status(hook, http.MethodPost, "/internal/calls") != http.StatusUnauthorized {
+		t.Fatal("call issuing skipped the hook token")
 	}
 	if status(opened, http.MethodPut, "/internal/rtc/plan") != http.StatusUnauthorized {
 		t.Fatal("opened test plan skipped the hook token")

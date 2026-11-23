@@ -95,6 +95,7 @@ func (s *Server) RegisterHook(mux *http.ServeMux, testControls bool) {
 	mux.HandleFunc("POST /internal/mqtt/auth", s.mqttAuth)
 	mux.HandleFunc("POST /internal/mqtt/acl", s.mqttACL)
 	mux.HandleFunc("POST /internal/media/events", s.mediaEvent)
+	mux.HandleFunc("POST /internal/calls", s.issueCall)
 	if testControls {
 		mux.HandleFunc("PUT /internal/rtc/plan", s.putPlan)
 	}

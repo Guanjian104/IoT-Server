@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -45,6 +47,43 @@ func TestVoiceCallPublishesPublicWHIP(t *testing.T) {
 	}
 	if _, ok := peer["whep_url"]; ok {
 		t.Fatal("voice call returned a subscribe address")
+	}
+}
+
+func TestInternalCallIssuesSeparateTokens(t *testing.T) {
+	node, err := sfu.ListenEndpoint("127.0.0.1:0", sfu.Endpoint{
+		PublicIP:  "203.0.113.5",
+		PublicURL: "http://203.0.113.5:18196",
+		UDPMin:    40100,
+		UDPMax:    40131,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = node.Close() })
+	api := &Server{media: node.Media(), hookToken: "hook-token"}
+	req := httptest.NewRequest(http.MethodPost, "/internal/calls", strings.NewReader(`{"mac":"9030d6cb2703","user_ref":"USER1","duration_min":15}`))
+	req.Header.Set("X-Iot-Hook-Token", "hook-token")
+	rec := httptest.NewRecorder()
+	api.issueCall(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var doc struct {
+		Whip        string `json:"whip_url"`
+		DeviceToken string `json:"device_token"`
+		AppToken    string `json:"app_token"`
+		Expires     string `json:"expires_at"`
+		WHEP        string `json:"whep_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Whip != "http://203.0.113.5:18196/whip/pion-9030d6cb2703" || doc.DeviceToken == "" || doc.AppToken == "" || doc.DeviceToken == doc.AppToken || doc.Expires == "" || doc.WHEP != "" {
+		t.Fatalf("call = %+v", doc)
+	}
+	if strings.Contains(doc.Whip, "127.0.0.1") || strings.Contains(rec.Body.String(), "/whep/") {
+		t.Fatalf("body = %s", rec.Body.String())
 	}
 }
 

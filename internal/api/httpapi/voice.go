@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -29,36 +30,11 @@ func (s *Server) commandPayload(ctx context.Context, deviceID string, userID int
 	if err != nil {
 		return nil, nil, err
 	}
-	publisher, ok := s.media.(voicePublisher)
-	if !ok || s.media == nil {
-		return nil, nil, errVoiceUnavailable
-	}
-	room, err := s.media.CreateRoom(ctx, media.RoomRequest{SessionID: deviceID})
+	opened, err := s.issueCallSession(ctx, deviceID, "call:u"+strconv.FormatInt(userID, 10), duration)
 	if err != nil {
-		return nil, nil, errVoiceUnavailable
+		return nil, nil, err
 	}
-	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
-	deviceCred, err := s.media.CreateJoinCredential(ctx, media.JoinRequest{
-		ResourceID: room.ID,
-		Identity:   "call:" + deviceID,
-		ExpiresAt:  expires,
-	})
-	if err != nil || !deviceCred.Connectable {
-		return nil, nil, errVoiceUnavailable
-	}
-	peerCred, err := s.media.CreateJoinCredential(ctx, media.JoinRequest{
-		ResourceID: room.ID,
-		Identity:   "call:u" + strconv.FormatInt(userID, 10),
-		ExpiresAt:  expires,
-	})
-	if err != nil || !peerCred.Connectable {
-		return nil, nil, errVoiceUnavailable
-	}
-	whip := publisher.PublishURL(room.ID)
-	if whip == "" || strings.Contains(whip, "127.0.0.1") || strings.Contains(whip, "localhost") {
-		return nil, nil, errVoiceUnavailable
-	}
-	params := map[string]any{"whip_url": whip, "token": deviceCred.Token}
+	params := map[string]any{"whip_url": opened.whip, "token": opened.deviceToken}
 	if duration > 0 {
 		params["duration_min"] = duration
 	}
@@ -71,10 +47,106 @@ func (s *Server) commandPayload(ctx context.Context, deviceID string, userID int
 		return nil, nil, err
 	}
 	return payload, map[string]any{
-		"whip_url":   whip,
-		"token":      peerCred.Token,
-		"expires_at": expires.Format(time.RFC3339),
+		"whip_url":   opened.whip,
+		"token":      opened.appToken,
+		"expires_at": opened.expires.Format(time.RFC3339),
 	}, nil
+}
+
+type callSession struct {
+	whip        string
+	deviceToken string
+	appToken    string
+	expires     time.Time
+}
+
+// issueCallSession 只建房间并签发双方发布凭证，不发布 MQTT。
+func (s *Server) issueCallSession(ctx context.Context, mac, peerIdentity string, duration int) (callSession, error) {
+	if !mqttmsg.ValidDeviceID(mac) || !callPeerIdentity(peerIdentity) {
+		return callSession{}, errors.New("invalid voice params")
+	}
+	if duration < 0 || duration > 60 {
+		return callSession{}, errors.New("invalid voice params")
+	}
+	publisher, ok := s.media.(voicePublisher)
+	if !ok || s.media == nil {
+		return callSession{}, errVoiceUnavailable
+	}
+	room, err := s.media.CreateRoom(ctx, media.RoomRequest{SessionID: mac})
+	if err != nil {
+		return callSession{}, errVoiceUnavailable
+	}
+	expires := time.Now().Add(10 * time.Minute).UTC().Truncate(time.Second)
+	deviceCred, err := s.media.CreateJoinCredential(ctx, media.JoinRequest{
+		ResourceID: room.ID,
+		Identity:   "call:" + mac,
+		ExpiresAt:  expires,
+	})
+	if err != nil || !deviceCred.Connectable {
+		return callSession{}, errVoiceUnavailable
+	}
+	peerCred, err := s.media.CreateJoinCredential(ctx, media.JoinRequest{
+		ResourceID: room.ID,
+		Identity:   peerIdentity,
+		ExpiresAt:  expires,
+	})
+	if err != nil || !peerCred.Connectable || peerCred.Token == deviceCred.Token {
+		return callSession{}, errVoiceUnavailable
+	}
+	whip := publisher.PublishURL(room.ID)
+	if whip == "" || strings.Contains(whip, "127.0.0.1") || strings.Contains(whip, "localhost") || strings.Contains(whip, "/whep/") {
+		return callSession{}, errVoiceUnavailable
+	}
+	return callSession{whip: whip, deviceToken: deviceCred.Token, appToken: peerCred.Token, expires: expires}, nil
+}
+
+func (s *Server) issueCall(w http.ResponseWriter, r *http.Request) {
+	if !s.hookOK(r) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var body struct {
+		MAC         string `json:"mac"`
+		UserRef     string `json:"user_ref"`
+		DurationMin int    `json:"duration_min"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	opened, err := s.issueCallSession(r.Context(), body.MAC, "call:u"+body.UserRef, body.DurationMin)
+	if errors.Is(err, errVoiceUnavailable) {
+		writeError(w, http.StatusServiceUnavailable, "unavailable")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"whip_url":     opened.whip,
+		"device_token": opened.deviceToken,
+		"app_token":    opened.appToken,
+		"expires_at":   opened.expires.Format(time.RFC3339),
+	})
+}
+
+func callPeerIdentity(identity string) bool {
+	const prefix = "call:u"
+	if !strings.HasPrefix(identity, prefix) {
+		return false
+	}
+	rest := identity[len(prefix):]
+	if rest == "" || len(rest) > 63 {
+		return false
+	}
+	for _, c := range rest {
+		if c < '0' || (c > '9' && c < 'A') || (c > 'Z' && c < 'a') || c > 'z' {
+			if c != '_' && c != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func voiceDuration(raw json.RawMessage) (int, error) {
