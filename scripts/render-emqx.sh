@@ -29,7 +29,7 @@ if [ -n "${IOT_COLLAR_CLIENT_ID:-}" ]; then
     precondition = "str_eq(username, 'root')"
     checks = [
       {
-        is_match = "not str_eq(clientid, '${IOT_COLLAR_CLIENT_ID}')"
+        is_match = "not(str_eq(clientid, '${IOT_COLLAR_CLIENT_ID}'))"
         result = deny
       }
     ]
