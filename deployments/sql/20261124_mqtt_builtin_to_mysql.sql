@@ -38,6 +38,8 @@ INSERT IGNORE INTO mqtt_acl (username, clientid, permission, action, topic) VALU
   ('eco-iot', '', 'allow', 'subscribe', 'pet/collar/+/state'),
   ('eco-iot', '', 'allow', 'subscribe', 'pet/collar/1_0pro/+/state'),
   ('eco-iot', '', 'allow', 'subscribe', 'pet/collar/2_0_test/+/state'),
+  ('eco-iot', '', 'allow', 'subscribe', 'pet/collar/1_0pro/+/audio'),
+  ('eco-iot', '', 'allow', 'subscribe', 'pet/collar/2_0_test/+/audio'),
   ('eco-iot', '', 'allow', 'publish', 'device/+/cmd'),
   ('eco-iot', '', 'allow', 'publish', 'device/cmd/petcollar/+'),
   ('eco-iot', '', 'allow', 'publish', 'device/+/archive/clear'),

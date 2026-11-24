@@ -24,7 +24,7 @@ umask 077
 # root 还要看客户端号：已登记的 1_0pro、2_0_test，或观察连接 9030d6cb0305。
 # 查不到行就拒绝，不再退回内置账号表。
 # precondition 必须写成空字符串。重载会留下文件里没写的旧条件，旧条件只放行 root。
-# 允许规则里，设备自己的 state/cmd 仍按 device 现查；eco-iot 的旧主题和观察连接在 mqtt_acl。
+# 允许规则里，设备自己的 state/cmd/audio 仍按 device 现查；eco-iot 的旧主题和观察连接在 mqtt_acl。
 # 查询里的 ${clientid}、${username} 由 EMQX 在执行时替换，这里只保留一个 $。
 cat > deployments/local/emqx.conf <<EOF
 node {
@@ -117,7 +117,7 @@ authorization {
       password = "${IOT_EMQX_DEVICE_DB_PASSWORD}"
       pool_size = 2
       query_timeout = "5s"
-      query = "SELECT 'allow' AS permission, 'publish' AS action, CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/state') AS topic FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON d.sn = gate.clientid WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/cmd') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON d.sn = gate.clientid WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'publish', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/cmd') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON gate.username = 'eco-iot' WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT a.permission, a.action, a.topic FROM mqtt_acl AS a INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON a.username = gate.username AND (a.clientid = '' OR a.clientid = gate.clientid)"
+      query = "SELECT 'allow' AS permission, 'publish' AS action, CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/state') AS topic FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON d.sn = gate.clientid WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/cmd') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON d.sn = gate.clientid WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'publish', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/audio') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON d.sn = gate.clientid WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/audio') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON d.sn = gate.clientid WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'publish', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/cmd') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON gate.username = 'eco-iot' WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'publish', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/audio') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON gate.username = 'eco-iot' WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT a.permission, a.action, a.topic FROM mqtt_acl AS a INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON a.username = gate.username AND (a.clientid = '' OR a.clientid = gate.clientid)"
     }
   ]
 }
