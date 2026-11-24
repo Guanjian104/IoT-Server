@@ -82,6 +82,8 @@ services:
     environment:
       EMQX_FEATURES: dashboard
       EMQX_SECURITY_PROFILE: hardened
+      # 节点名必须固定。容器有两张网卡时，按第一块地址命名会换一套空的内置账号。
+      EMQX_NODE__NAME: emqx@172.18.0.4
       EMQX_NODE__COOKIE: ${EMQX_NODE_COOKIE:?set EMQX_NODE_COOKIE}
       EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DEV_DASHBOARD_PASSWORD:?set EMQX_DEV_DASHBOARD_PASSWORD}
     ports:

@@ -92,7 +92,7 @@ authentication = [
       name = sha256
       salt_position = suffix
     }
-    query = "SELECT '0000000000000000000000000000000000000000000000000000000000000000' AS password_hash, '' AS salt WHERE NOT EXISTS (SELECT 1 FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test')) AND \${clientid} <> '9030d6cb0305'"
+    query = "SELECT '0000000000000000000000000000000000000000000000000000000000000000' AS password_hash, '' AS salt FROM (SELECT \${clientid} AS cid) AS gate WHERE gate.cid <> '9030d6cb0305' AND NOT EXISTS (SELECT 1 FROM device WHERE sn = gate.cid AND topic_model IN ('1_0pro', '2_0_test'))"
   },
   {
     mechanism = password_based
