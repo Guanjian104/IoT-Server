@@ -23,6 +23,7 @@ umask 077
 # 认证只走 MySQL。eco-iot 按用户名对口令。
 # root 还要看客户端号：已登记的 1_0pro、2_0_test，或观察连接 9030d6cb0305。
 # 查不到行就拒绝，不再退回内置账号表。
+# precondition 必须写成空字符串。重载会留下文件里没写的旧条件，旧条件只放行 root。
 # 允许规则里，设备自己的 state/cmd 仍按 device 现查；eco-iot 的旧主题和观察连接在 mqtt_acl。
 # 查询里的 ${clientid}、${username} 由 EMQX 在执行时替换，这里只保留一个 $。
 cat > deployments/local/emqx.conf <<EOF
@@ -92,7 +93,8 @@ authentication = [
       name = sha256
       salt_position = suffix
     }
-    query = "SELECT c.password_hash, c.salt FROM mqtt_credential AS c INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON c.username = gate.username WHERE c.username = 'eco-iot' OR (c.username = 'root' AND (gate.clientid = '9030d6cb0305' OR EXISTS (SELECT 1 FROM device AS d WHERE d.sn = gate.clientid AND d.topic_model IN ('1_0pro', '2_0_test'))))"
+    precondition = ""
+    query = "SELECT password_hash, salt FROM mqtt_credential WHERE username = \${username} AND (username = 'eco-iot' OR (username = 'root' AND (\${clientid} = '9030d6cb0305' OR EXISTS (SELECT 1 FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test')))))"
   }
 ]
 

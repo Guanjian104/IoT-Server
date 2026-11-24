@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS mqtt_credential (
   password_hash CHAR(64) NOT NULL,
   salt VARCHAR(64) NOT NULL,
   PRIMARY KEY (username)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS mqtt_acl (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -18,7 +18,10 @@ CREATE TABLE IF NOT EXISTS mqtt_acl (
   topic VARCHAR(255) NOT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uk_mqtt_acl (username, clientid, permission, action, topic)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE mqtt_credential CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER TABLE mqtt_acl CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 INSERT IGNORE INTO mqtt_acl (username, clientid, permission, action, topic) VALUES
   ('eco-iot', '', 'allow', 'subscribe', 'cat/event'),
