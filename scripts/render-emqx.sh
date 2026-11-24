@@ -1,6 +1,6 @@
 #!/bin/sh
 # 把本机 .env 渲染成 EMQX 只读配置。文件含节点 cookie 和只读库口令，不进入仓库。
-# eco-iot 与 root 的口令仍在内置库。项圈能不能连，查 eco_iot.device，不回调业务进程。
+# root 与 eco-iot 的口令在 eco_iot.mqtt_credential。能不能连、能碰哪些主题，都查这只库。
 set -eu
 cd "$(dirname "$0")/.."
 if [ ! -f .env ]; then
@@ -20,9 +20,10 @@ for value in "$EMQX_NODE_COOKIE" "$EMQX_DEV_DASHBOARD_PASSWORD" "${IOT_EMQX_DEVI
 done
 mkdir -p deployments/local
 umask 077
-# root 先走 MySQL：设备不在表里时返回一行对不上的散列，连接在内置库之前被拒绝。
-# 查到 sn 且 topic_model 为 1_0pro 或 2_0_test 时不返回行，接着用内置库核对 root 口令。
-# 观察连接 9030d6cb0305 同样不返回行，口令仍走内置库。它只能订 state、向具体代次的 cmd 发布。
+# 认证只走 MySQL。eco-iot 按用户名对口令。
+# root 还要看客户端号：已登记的 1_0pro、2_0_test，或观察连接 9030d6cb0305。
+# 查不到行就拒绝，不再退回内置账号表。
+# 允许规则里，设备自己的 state/cmd 仍按 device 现查；eco-iot 的旧主题和观察连接在 mqtt_acl。
 # 查询里的 ${clientid}、${username} 由 EMQX 在执行时替换，这里只保留一个 $。
 cat > deployments/local/emqx.conf <<EOF
 node {
@@ -81,7 +82,6 @@ authentication = [
     mechanism = password_based
     backend = mysql
     enable = true
-    precondition = "str_eq(username, 'root')"
     server = "eco-mysql:3306"
     database = "eco_iot"
     username = "emqx_gate"
@@ -92,17 +92,7 @@ authentication = [
       name = sha256
       salt_position = suffix
     }
-    query = "SELECT '0000000000000000000000000000000000000000000000000000000000000000' AS password_hash, '' AS salt FROM (SELECT \${clientid} AS cid) AS gate WHERE gate.cid <> '9030d6cb0305' AND NOT EXISTS (SELECT 1 FROM device WHERE sn = gate.cid AND topic_model IN ('1_0pro', '2_0_test'))"
-  },
-  {
-    mechanism = password_based
-    backend = built_in_database
-    user_id_type = username
-    password_hash_algorithm {
-      name = sha256
-      salt_position = suffix
-    }
-    enable = true
+    query = "SELECT c.password_hash, c.salt FROM mqtt_credential AS c INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON c.username = gate.username WHERE c.username = 'eco-iot' OR (c.username = 'root' AND (gate.clientid = '9030d6cb0305' OR EXISTS (SELECT 1 FROM device AS d WHERE d.sn = gate.clientid AND d.topic_model IN ('1_0pro', '2_0_test'))))"
   }
 ]
 
@@ -117,10 +107,6 @@ authorization {
   }
   sources = [
     {
-      type = built_in_database
-      enable = true
-    },
-    {
       type = mysql
       enable = true
       server = "eco-mysql:3306"
@@ -129,7 +115,7 @@ authorization {
       password = "${IOT_EMQX_DEVICE_DB_PASSWORD}"
       pool_size = 2
       query_timeout = "5s"
-      query = "SELECT 'allow' AS permission, 'publish' AS action, CONCAT('pet/collar/', topic_model, '/', sn, '/state') AS topic FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', CONCAT('pet/collar/', topic_model, '/', sn, '/cmd') FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'publish', CONCAT('pet/collar/', topic_model, '/', sn, '/cmd') FROM device WHERE \${username} = 'eco-iot' AND topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', 'pet/collar/+/+/state' WHERE \${username} = 'root' AND \${clientid} = '9030d6cb0305' UNION ALL SELECT 'allow', 'publish', 'pet/collar/1_0pro/+/cmd' WHERE \${username} = 'root' AND \${clientid} = '9030d6cb0305' UNION ALL SELECT 'allow', 'publish', 'pet/collar/2_0_test/+/cmd' WHERE \${username} = 'root' AND \${clientid} = '9030d6cb0305'"
+      query = "SELECT 'allow' AS permission, 'publish' AS action, CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/state') AS topic FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON d.sn = gate.clientid WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/cmd') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON d.sn = gate.clientid WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'publish', CONCAT('pet/collar/', d.topic_model, '/', d.sn, '/cmd') FROM device AS d INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON gate.username = 'eco-iot' WHERE d.topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT a.permission, a.action, a.topic FROM mqtt_acl AS a INNER JOIN (SELECT \${username} AS username, \${clientid} AS clientid) AS gate ON a.username = gate.username AND (a.clientid = '' OR a.clientid = gate.clientid)"
     }
   ]
 }
