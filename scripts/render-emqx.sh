@@ -22,6 +22,7 @@ mkdir -p deployments/local
 umask 077
 # root 先走 MySQL：设备不在表里时返回一行对不上的散列，连接在内置库之前被拒绝。
 # 查到 sn 且 topic_model 为 1_0pro 或 2_0_test 时不返回行，接着用内置库核对 root 口令。
+# 观察连接 9030d6cb0305 同样不返回行，口令仍走内置库。它只能订 state、向具体代次的 cmd 发布。
 # 查询里的 ${clientid}、${username} 由 EMQX 在执行时替换，这里只保留一个 $。
 cat > deployments/local/emqx.conf <<EOF
 node {
@@ -91,7 +92,7 @@ authentication = [
       name = sha256
       salt_position = suffix
     }
-    query = "SELECT '0000000000000000000000000000000000000000000000000000000000000000' AS password_hash, '' AS salt WHERE NOT EXISTS (SELECT 1 FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test'))"
+    query = "SELECT '0000000000000000000000000000000000000000000000000000000000000000' AS password_hash, '' AS salt WHERE NOT EXISTS (SELECT 1 FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test')) AND \${clientid} <> '9030d6cb0305'"
   },
   {
     mechanism = password_based
@@ -128,7 +129,7 @@ authorization {
       password = "${IOT_EMQX_DEVICE_DB_PASSWORD}"
       pool_size = 2
       query_timeout = "5s"
-      query = "SELECT 'allow' AS permission, 'publish' AS action, CONCAT('pet/collar/', topic_model, '/', sn, '/state') AS topic FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', CONCAT('pet/collar/', topic_model, '/', sn, '/cmd') FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'publish', CONCAT('pet/collar/', topic_model, '/', sn, '/cmd') FROM device WHERE \${username} = 'eco-iot' AND topic_model IN ('1_0pro', '2_0_test')"
+      query = "SELECT 'allow' AS permission, 'publish' AS action, CONCAT('pet/collar/', topic_model, '/', sn, '/state') AS topic FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', CONCAT('pet/collar/', topic_model, '/', sn, '/cmd') FROM device WHERE sn = \${clientid} AND topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'publish', CONCAT('pet/collar/', topic_model, '/', sn, '/cmd') FROM device WHERE \${username} = 'eco-iot' AND topic_model IN ('1_0pro', '2_0_test') UNION ALL SELECT 'allow', 'subscribe', 'pet/collar/+/+/state' WHERE \${username} = 'root' AND \${clientid} = '9030d6cb0305' UNION ALL SELECT 'allow', 'publish', 'pet/collar/1_0pro/+/cmd' WHERE \${username} = 'root' AND \${clientid} = '9030d6cb0305' UNION ALL SELECT 'allow', 'publish', 'pet/collar/2_0_test/+/cmd' WHERE \${username} = 'root' AND \${clientid} = '9030d6cb0305'"
     }
   ]
 }
