@@ -113,14 +113,26 @@ func (s *Server) issueCall(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
+	if s.log != nil {
+		s.log.Info("voice-call PLATFORM", "hop", "issue", "direction", "sent", "mac", body.MAC, "user_ref", body.UserRef, "duration_min", body.DurationMin)
+	}
 	opened, err := s.issueCallSession(r.Context(), body.MAC, "call:u"+body.UserRef, body.DurationMin)
 	if errors.Is(err, errVoiceUnavailable) {
+		if s.log != nil {
+			s.log.Info("voice-call PLATFORM", "hop", "issue", "direction", "received", "mac", body.MAC, "status", http.StatusServiceUnavailable)
+		}
 		writeError(w, http.StatusServiceUnavailable, "unavailable")
 		return
 	}
 	if err != nil {
+		if s.log != nil {
+			s.log.Info("voice-call PLATFORM", "hop", "issue", "direction", "received", "mac", body.MAC, "status", http.StatusBadRequest)
+		}
 		writeError(w, http.StatusBadRequest, "invalid")
 		return
+	}
+	if s.log != nil {
+		s.log.Info("voice-call PLATFORM", "hop", "issue", "direction", "received", "mac", body.MAC, "status", http.StatusOK, "whip_url", opened.whip, "expires_at", opened.expires.Format(time.RFC3339))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"whip_url":     opened.whip,

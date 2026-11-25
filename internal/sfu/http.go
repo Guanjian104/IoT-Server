@@ -141,11 +141,21 @@ func (n *Node) whepAnswer(w http.ResponseWriter, r *http.Request) {
 func (n *Node) serverOffer(w http.ResponseWriter, r *http.Request, role string) {
 	roomID := r.PathValue("roomID")
 	identity, ok := n.authorize(r, roomID, role)
+	side, call := voiceCallSide(identity)
 	if !ok {
+		if role == "publish" {
+			n.logVoice("UNKNOWN", "whip", "sent", "room", roomID, "method", r.Method, "status", http.StatusUnauthorized)
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if call {
+		n.logVoice(side, "whip", "sent", "room", roomID, "identity", identity, "method", r.Method)
+	}
 	if n.room(roomID) == nil {
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusNotFound)
+		}
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -153,10 +163,16 @@ func (n *Node) serverOffer(w http.ResponseWriter, r *http.Request, role string) 
 	defer timer.Stop()
 	select {
 	case offer := <-n.offerBox(roomID, identity):
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusOK, "sdp", sdpBrief(offer.SDP))
+		}
 		w.Header().Set("Content-Type", "application/sdp")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(offer.SDP))
 	case <-timer.C:
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusNoContent)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case <-r.Context().Done():
 	}
@@ -165,18 +181,31 @@ func (n *Node) serverOffer(w http.ResponseWriter, r *http.Request, role string) 
 func (n *Node) serverAnswer(w http.ResponseWriter, r *http.Request, role string) {
 	roomID := r.PathValue("roomID")
 	identity, ok := n.authorize(r, roomID, role)
+	side, call := voiceCallSide(identity)
 	if !ok {
+		if role == "publish" {
+			n.logVoice("UNKNOWN", "whip", "sent", "room", roomID, "method", r.Method, "status", http.StatusUnauthorized)
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	room := n.room(roomID)
 	if room == nil {
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusNotFound)
+		}
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	answer, body, err := readSDP(r, webrtc.SDPTypeAnswer)
+	if call {
+		n.logVoice(side, "whip", "sent", "room", roomID, "identity", identity, "method", r.Method, "sdp", sdpBrief(string(body)))
+	}
 	if err != nil {
 		n.logSDP(roomID, "answer", r.Header.Get("Content-Type"), body, err)
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusBadRequest)
+		}
 		http.Error(w, "invalid", http.StatusBadRequest)
 		return
 	}
@@ -184,8 +213,14 @@ func (n *Node) serverAnswer(w http.ResponseWriter, r *http.Request, role string)
 		if sdpRejected(err) {
 			n.logSDP(roomID, "answer", r.Header.Get("Content-Type"), body, err)
 		}
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", signalStatus(err))
+		}
 		writeSignalError(w, err)
 		return
+	}
+	if call {
+		n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusNoContent)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -193,24 +228,40 @@ func (n *Node) serverAnswer(w http.ResponseWriter, r *http.Request, role string)
 func (n *Node) exchange(w http.ResponseWriter, r *http.Request, role string) {
 	roomID := r.PathValue("roomID")
 	identity, ok := n.authorize(r, roomID, role)
+	side, call := voiceCallSide(identity)
 	if !ok {
+		if role == "publish" {
+			n.logVoice("UNKNOWN", "whip", "sent", "room", roomID, "method", r.Method, "status", http.StatusUnauthorized)
+		}
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	room := n.room(roomID)
 	if room == nil {
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusNotFound)
+		}
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	offer, body, err := readSDP(r, webrtc.SDPTypeOffer)
+	if call {
+		n.logVoice(side, "whip", "sent", "room", roomID, "identity", identity, "method", r.Method, "sdp", sdpBrief(string(body)))
+	}
 	if err != nil {
 		n.logSDP(roomID, "offer", r.Header.Get("Content-Type"), body, err)
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusBadRequest)
+		}
 		http.Error(w, "invalid", http.StatusBadRequest)
 		return
 	}
 	if err := room.Join(identity); err != nil {
 		if sdpRejected(err) {
 			n.logSDP(roomID, "offer", r.Header.Get("Content-Type"), body, err)
+		}
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", signalStatus(err))
 		}
 		writeSignalError(w, err)
 		return
@@ -220,12 +271,68 @@ func (n *Node) exchange(w http.ResponseWriter, r *http.Request, role string) {
 		if sdpRejected(err) {
 			n.logSDP(roomID, "offer", r.Header.Get("Content-Type"), body, err)
 		}
+		if call {
+			n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", signalStatus(err))
+		}
 		writeSignalError(w, err)
 		return
+	}
+	if call {
+		n.logVoice(side, "whip", "received", "room", roomID, "identity", identity, "status", http.StatusCreated, "sdp", sdpBrief(answer.SDP))
 	}
 	w.Header().Set("Content-Type", "application/sdp")
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write([]byte(answer.SDP))
+}
+
+func voiceCallSide(identity string) (string, bool) {
+	switch {
+	case strings.HasPrefix(identity, "call:u"):
+		return "APP", true
+	case strings.HasPrefix(identity, "call:"):
+		return "DEVICE", true
+	default:
+		return "", false
+	}
+}
+
+func (n *Node) logVoice(side, hop, direction string, args ...any) {
+	if n == nil || n.log == nil || side == "" {
+		return
+	}
+	n.log.Info("voice-call "+side, append([]any{"hop", hop, "direction", direction}, args...)...)
+}
+
+func sdpBrief(sdp string) string {
+	var lines []string
+	for _, line := range strings.Split(strings.ReplaceAll(sdp, "\r\n", "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "m="),
+			strings.HasPrefix(line, "a=rtpmap:"),
+			strings.HasPrefix(line, "a=sendrecv"),
+			strings.HasPrefix(line, "a=recvonly"),
+			strings.HasPrefix(line, "a=sendonly"),
+			strings.HasPrefix(line, "a=inactive"),
+			strings.HasPrefix(line, "a=setup:"):
+			lines = append(lines, strings.TrimSpace(line))
+		}
+	}
+	text := strings.Join(lines, " | ")
+	if len(text) > 500 {
+		return text[:500]
+	}
+	return text
+}
+
+func signalStatus(err error) int {
+	switch {
+	case errors.Is(err, errPeerExists):
+		return http.StatusConflict
+	case errors.Is(err, errRoomClosed), errors.Is(err, errPeerMissing):
+		return http.StatusNotFound
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 func (n *Node) authorize(r *http.Request, roomID, role string) (string, bool) {
