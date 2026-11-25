@@ -98,6 +98,7 @@ func (rt *runtime) openSFU() error {
 		return errors.New("listen failed")
 	}
 	rt.sfu = node
+	node.UseLog(rt.log)
 	if rt.store != nil {
 		rt.store.UseMedia(node.Media())
 	}

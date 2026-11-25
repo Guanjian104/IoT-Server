@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/pion/webrtc/v4"
+
+	"iot-server/internal/logger"
 )
 
 // Node 在本机提供 WHIP、WHEP，并保管这些房间的短期凭证密钥。
@@ -21,6 +23,7 @@ type Node struct {
 	base      string
 	publicURL string
 	http      *http.Server
+	log       logger.Logger
 
 	mu        sync.Mutex
 	rooms     map[string]*Room
@@ -74,6 +77,14 @@ func ListenEndpoint(addr string, ep Endpoint) (*Node, error) {
 	}
 	go func() { _ = node.http.Serve(ln) }()
 	return node, nil
+}
+
+// UseLog 把拒绝 SDP 的原因写到进程日志。没有日志器时保持静默。
+func (n *Node) UseLog(log logger.Logger) {
+	if n == nil {
+		return
+	}
+	n.log = log
 }
 
 // Close 停止 HTTP 并关闭全部房间。
@@ -163,12 +174,16 @@ func (n *Node) serverAnswer(w http.ResponseWriter, r *http.Request, role string)
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	answer, err := readSDP(r, webrtc.SDPTypeAnswer)
+	answer, body, err := readSDP(r, webrtc.SDPTypeAnswer)
 	if err != nil {
+		n.logSDP(roomID, "answer", r.Header.Get("Content-Type"), body, err)
 		http.Error(w, "invalid", http.StatusBadRequest)
 		return
 	}
 	if err := room.HandleAnswer(identity, answer); err != nil {
+		if sdpRejected(err) {
+			n.logSDP(roomID, "answer", r.Header.Get("Content-Type"), body, err)
+		}
 		writeSignalError(w, err)
 		return
 	}
@@ -187,17 +202,24 @@ func (n *Node) exchange(w http.ResponseWriter, r *http.Request, role string) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	offer, err := readSDP(r, webrtc.SDPTypeOffer)
+	offer, body, err := readSDP(r, webrtc.SDPTypeOffer)
 	if err != nil {
+		n.logSDP(roomID, "offer", r.Header.Get("Content-Type"), body, err)
 		http.Error(w, "invalid", http.StatusBadRequest)
 		return
 	}
 	if err := room.Join(identity); err != nil {
+		if sdpRejected(err) {
+			n.logSDP(roomID, "offer", r.Header.Get("Content-Type"), body, err)
+		}
 		writeSignalError(w, err)
 		return
 	}
 	answer, err := room.HandleOffer(identity, offer)
 	if err != nil {
+		if sdpRejected(err) {
+			n.logSDP(roomID, "offer", r.Header.Get("Content-Type"), body, err)
+		}
 		writeSignalError(w, err)
 		return
 	}
@@ -272,15 +294,36 @@ func (n *Node) boxLocked(roomID, peerID string) chan webrtc.SessionDescription {
 	return ch
 }
 
-func readSDP(r *http.Request, kind webrtc.SDPType) (webrtc.SessionDescription, error) {
-	if !strings.Contains(r.Header.Get("Content-Type"), "application/sdp") {
-		return webrtc.SessionDescription{}, errors.New("content type")
-	}
+func readSDP(r *http.Request, kind webrtc.SDPType) (webrtc.SessionDescription, []byte, error) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16+1))
-	if err != nil || len(body) == 0 || len(body) > 1<<16 {
-		return webrtc.SessionDescription{}, errors.New("sdp")
+	if err != nil {
+		return webrtc.SessionDescription{}, nil, err
 	}
-	return webrtc.SessionDescription{Type: kind, SDP: string(body)}, nil
+	if !strings.Contains(r.Header.Get("Content-Type"), "application/sdp") {
+		return webrtc.SessionDescription{}, body, errors.New("content type")
+	}
+	if len(body) == 0 || len(body) > 1<<16 {
+		return webrtc.SessionDescription{}, body, errors.New("sdp")
+	}
+	return webrtc.SessionDescription{Type: kind, SDP: string(body)}, body, nil
+}
+
+func sdpRejected(err error) bool {
+	return err != nil && !errors.Is(err, errPeerExists) && !errors.Is(err, errRoomClosed) && !errors.Is(err, errPeerMissing)
+}
+
+func (n *Node) logSDP(roomID, kind, contentType string, body []byte, err error) {
+	if n == nil || n.log == nil || err == nil {
+		return
+	}
+	n.log.Warn("sfu sdp rejected",
+		"room_id", roomID,
+		"kind", kind,
+		"content_type", contentType,
+		"bytes", len(body),
+		"err", err.Error(),
+		"sdp", string(body),
+	)
 }
 
 func writeSignalError(w http.ResponseWriter, err error) {
