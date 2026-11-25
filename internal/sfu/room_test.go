@@ -2,6 +2,7 @@ package sfu
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,6 +166,80 @@ func connect(t *testing.T, client *webrtc.PeerConnection, room *Room, id string)
 	if err := client.SetRemoteDescription(answer); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestOfferSkipsTrackItCannotReceive(t *testing.T) {
+	room, err := NewRoom("room-codec", NewAPI(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = room.Close() })
+	opus, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2},
+		"audio",
+		"app-stream",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	room.mu.Lock()
+	room.tracks["call:u7/audio"] = &forwardTrack{
+		publisherID: "call:u7",
+		id:          "audio",
+		kind:        "audio",
+		local:       opus,
+		cancel:      func() {},
+	}
+	room.mu.Unlock()
+
+	const device = "call:9030d6cb2703"
+	if err := room.Join(device); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := room.HandleOffer(device, pcmaOnlyOffer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(answer.SDP, "PCMA/8000") {
+		t.Fatalf("answer = %s", answer.SDP)
+	}
+}
+
+func pcmaOnlyOffer(t *testing.T) webrtc.SessionDescription {
+	t.Helper()
+	var mediaEngine webrtc.MediaEngine
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMA, ClockRate: 8000, Channels: 1},
+		PayloadType:        8,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		t.Fatal(err)
+	}
+	var settings webrtc.SettingEngine
+	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(&mediaEngine), webrtc.WithSettingEngine(settings))
+	pc, err := api.NewPeerConnection(webrtc.Configuration{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	if _, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RTPTransceiverInit{
+		Direction: webrtc.RTPTransceiverDirectionSendrecv,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pc.SetLocalDescription(offer); err != nil {
+		t.Fatal(err)
+	}
+	<-webrtc.GatheringCompletePromise(pc)
+	local := pc.LocalDescription()
+	if local == nil || !strings.Contains(local.SDP, "PCMA/8000") || strings.Contains(local.SDP, "opus/48000") {
+		t.Fatalf("offer = %v", local)
+	}
+	return *local
 }
 
 func TestJoinReplacesSameIdentity(t *testing.T) {

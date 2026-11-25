@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -165,26 +166,14 @@ func (r *Room) Join(id string) error {
 		_ = pc.Close()
 		return errPeerExists
 	}
-	for _, track := range r.tracks {
-		if !delivers(id, track.publisherID) {
-			continue
-		}
-		sender, addErr := pc.AddTrack(track.local)
-		if addErr != nil {
-			r.mu.Unlock()
-			_ = pc.Close()
-			return addErr
-		}
-		member.dirty = true
-		go readRTCP(r.ctx, sender)
-	}
 	r.peers[id] = member
 	r.mu.Unlock()
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed {
-			r.release(member)
+		if state != webrtc.PeerConnectionStateFailed && state != webrtc.PeerConnectionStateClosed {
+			return
 		}
+		go r.release(member)
 	})
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		r.forward(id, track)
@@ -193,14 +182,63 @@ func (r *Room) Join(id string) error {
 	return nil
 }
 
+// compatibleTracks 取出这份 Offer 能够接收的已有音频。编码不在 Offer 里的轨道留在房间，不接到这条新连接上。
+func (r *Room) compatibleTracks(id string, offer webrtc.SessionDescription) []*forwardTrack {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var tracks []*forwardTrack
+	for _, track := range r.tracks {
+		if !delivers(id, track.publisherID) || !offerSupports(offer, track.local.Codec()) {
+			continue
+		}
+		tracks = append(tracks, track)
+	}
+	return tracks
+}
+
+func offerSupports(offer webrtc.SessionDescription, codec webrtc.RTPCodecCapability) bool {
+	name := codec.MimeType
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	needle := name + "/"
+	if codec.ClockRate != 0 {
+		needle += strconv.FormatUint(uint64(codec.ClockRate), 10)
+	}
+	for _, line := range strings.Split(offer.SDP, "\n") {
+		line = strings.ToLower(strings.TrimSpace(strings.TrimRight(line, "\r")))
+		if !strings.HasPrefix(line, "a=rtpmap:") {
+			continue
+		}
+		_, value, ok := strings.Cut(line, " ")
+		if ok && strings.HasPrefix(strings.TrimSpace(value), needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // HandleOffer 处理成员发来的 offer，返回已经收集完本机候选地址的 answer。
 func (r *Room) HandleOffer(id string, offer webrtc.SessionDescription) (webrtc.SessionDescription, error) {
 	member, err := r.member(id)
 	if err != nil {
 		return webrtc.SessionDescription{}, err
 	}
+	tracks := r.compatibleTracks(id, offer)
 	member.signal.Lock()
 	defer member.signal.Unlock()
+	for _, track := range tracks {
+		sender, addErr := member.pc.AddTrack(track.local)
+		if addErr != nil {
+			continue
+		}
+		member.dirty = true
+		go readRTCP(r.ctx, sender)
+	}
 	if err := member.pc.SetRemoteDescription(offer); err != nil {
 		return webrtc.SessionDescription{}, err
 	}
