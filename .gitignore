@@ -43,3 +43,6 @@ vendor/
 # Temporary files
 tmp/
 temp/
+
+# 通话抓包。data/pcap 里的文件不进入仓库。
+/data/pcap/
