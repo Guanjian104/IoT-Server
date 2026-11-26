@@ -197,7 +197,7 @@ GET /api/v1/pet/devices/<data.id>/activity
 GET /api/v1/pet/devices/<data.id>/mic-latest
 ```
 
-`GET /api/v1/pet/devices/<data.id>/activity-latest` 与 `activity` 相同。录音正文见本节「录音」，路径是 `mic-pcm`。活动时长和录音摘要保留最近 24 小时，过期后补齐结果为 `null`。
+`GET /api/v1/pet/devices/<data.id>/activity-latest` 与 `activity` 相同。活动时长保留最近 24 小时，过期后补齐结果为 `null`。录音地址见本节「录音」，可以反复打开。
 
 ### 在线
 
@@ -451,36 +451,34 @@ GET /api/v1/pet/devices/<data.id>/activity
 
 ### 录音
 
-App 不下发 `mic_record`。设备把一段录音传完后，才推 `pet_mic`。半段、分片和预设音都不推。`fmt` 固定 `pcm16le`，`rate` 固定 `8000`，`bytes` 是整段字节数。只保留最近拼完的一段，24 小时后补齐为 `null`。
+App 不下发 `mic_record`。设备把一段录音传完后，才推 `pet_mic`。半段、分片和预设音都不推。声音文件放在对象存储，页面只拿地址。`url` 是公网地址，没有到期时间，可以反复打开。
+
+`fmt` 固定 `pcm16le`，`rate` 固定 `8000`。`ts` 是设备报文里的 Unix 秒。`bytes` 是整段 PCM 的字节数。`id` 是这一段自己的编号，两段不会共用同一个地址。
 
 ```json
 {
   "type": "pet_mic",
   "topic": "pet_mic:<data.id>",
   "data": {
+    "id": "<录音编号>",
     "ts": 1760580001,
     "fmt": "pcm16le",
     "rate": 8000,
-    "bytes": 16000
+    "bytes": 16000,
+    "url": "https://<桶域名>/collar/mic/<data.id>/<录音编号>.pcm"
   }
 }
 ```
 
-摘要：
+`mic-latest` 的 `data` 与上面这一帧的 `data` 相同。还没有录音时 HTTP 成功，`data` 为 `null`。
+
+历史列表从新到旧。`limit` 默认 20，最大 50。`cursor` 用上一页 `next_cursor`。
 
 ```http
-GET /api/v1/pet/devices/<data.id>/mic-latest
+GET /api/v1/pet/devices/<data.id>/mics?limit=20&cursor=<next_cursor>
 ```
 
-成功时 `data` 与上面的 `data` 相同。还没有拼完的录音时 `data` 为 `null`。
-
-这一段的声音正文：
-
-```http
-GET /api/v1/pet/devices/<data.id>/mic-pcm
-```
-
-有录音时 HTTP 200，`Content-Type` 为 `application/octet-stream`，正文是 8 kHz、单声道、16 位小端 PCM，没有 WAV 头，长度等于摘要里的 `bytes`。还没有录音时 HTTP 200，正文是 JSON，`data` 为 `null`。先看 `Content-Type` 再解析。
+成功时 `data.items` 每一项字段与 `pet_mic` 的 `data` 相同。`next_cursor` 为空表示没有更旧的录音。不是这台设备的主人时，请求失败。
 
 ## 6. 语音通话
 
