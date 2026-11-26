@@ -66,7 +66,7 @@ const (
 )
 
 var (
-	businessTopic = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test)/([0-9a-f]{12})/(cmd|state)$`)
+	businessTopic = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test)/([0-9a-f]{12})/(cmd|state|audio)$`)
 	watchState    = regexp.MustCompile(`^pet/collar/(1_0pro|2_0_test|\+)/([0-9a-f]{12}|\+)/state$`)
 )
 
@@ -75,7 +75,7 @@ func KnownModel(model string) bool {
 	return model == Model10Pro || model == Model20Test || model == ModelWatch
 }
 
-// SplitTopic 解析项圈业务主题。kind 为 cmd 或 state。
+// SplitTopic 解析项圈业务主题。kind 为 cmd、state 或 audio。
 func SplitTopic(topic string) (deviceID, model, kind string, err error) {
 	match := businessTopic.FindStringSubmatch(topic)
 	if match == nil {
@@ -101,7 +101,7 @@ func Topic(model, deviceID, kind string) string {
 		return ""
 	}
 	switch kind {
-	case "cmd", "state":
+	case "cmd", "state", "audio":
 		return "pet/collar/" + model + "/" + deviceID + "/" + kind
 	default:
 		return ""
@@ -136,13 +136,15 @@ func decideDevice(deviceID, model, action, topic string) string {
 	}
 	switch action {
 	case "publish":
+		// 设备发自己的 state，录音分片走自己的 audio。
 		id, got, kind, err := SplitTopic(topic)
-		if err != nil || id != deviceID || got != model || kind != "state" {
+		if err != nil || id != deviceID || got != model || (kind != "state" && kind != "audio") {
 			return "deny"
 		}
 		return "allow"
 	case "subscribe":
-		if topic == Topic(model, deviceID, "cmd") {
+		// cmd 收指令；audio 收 speaker_play 的 preset 分片。
+		if topic == Topic(model, deviceID, "cmd") || topic == Topic(model, deviceID, "audio") {
 			return "allow"
 		}
 		return "deny"
@@ -215,6 +217,8 @@ func ecoIoTSubscribeFilters() []string {
 		"pet/collar/+/state",
 		"pet/collar/" + Model10Pro + "/+/state",
 		"pet/collar/" + Model20Test + "/+/state",
+		"pet/collar/" + Model10Pro + "/+/audio",
+		"pet/collar/" + Model20Test + "/+/audio",
 	}
 }
 
@@ -246,7 +250,7 @@ func ecoIoTPublish(topic string) bool {
 		return true
 	case len(parts) == 4 && parts[0] == "device" && parts[2] == "archive" && parts[3] == "clear" && parts[1] != "":
 		return true
-	case len(parts) == 5 && parts[0] == "pet" && parts[1] == "collar" && parts[4] == "cmd" && (parts[2] == Model10Pro || parts[2] == Model20Test) && ValidDeviceID(parts[3]):
+	case len(parts) == 5 && parts[0] == "pet" && parts[1] == "collar" && (parts[4] == "cmd" || parts[4] == "audio") && (parts[2] == Model10Pro || parts[2] == Model20Test) && ValidDeviceID(parts[3]):
 		return true
 	default:
 		return false

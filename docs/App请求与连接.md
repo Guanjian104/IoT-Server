@@ -2,7 +2,7 @@
 
 App 只连接 App 服务。这次 cs 联调的地址是 `http://120.25.100.77:18082`，WebSocket 是 `ws://120.25.100.77:18082/api/v1/ws`。
 
-App 不连接 EMQX，也不直接连接网关 `18080`。不保存商家密钥、席位密钥或 Device-Server 的登录令牌。通话时，媒体地址 `whip_url` 按第 6 节直接连接，不经过 App 服务。
+App 不连接 EMQX，也不直接连接网关 `18080`。不保存商家密钥、席位密钥或 Device-Server 的登录令牌。通话时，媒体地址 `whip_url` 按第 6 节直接连接，不经过 App 服务。人翻宠按第 7 节只上传录音，项圈播放由服务端完成。
 
 ## 1. 拿到登录令牌
 
@@ -353,7 +353,7 @@ GET /api/v1/pet/devices/<data.id>/pose-records?limit=50&cursor=<next_cursor>
 | `-40` | 通话射频失败 |
 | `-10` 到 `-17` | 通话还没有得到 HTTP 响应，这时没有 `http` 和 `detail` |
 
-`find_light`、`buzzer`、`gps_oneshot`、`voice_call` 发出后 15 秒内一条回执都没有，WebSocket 上不会出现超时帧。已经收到 `accepted`、`joining` 或 `in_call` 之后，继续等后面的 `pet_cmd`。
+`find_light`、`buzzer`、`gps_oneshot`、`voice_call`、`speaker_play` 发出后 15 秒内一条回执都没有，WebSocket 上不会出现超时帧。`speaker_play` 的结果另看第 7 节的 `pet_playback`。已经收到 `accepted`、`joining` 或 `in_call` 之后，继续等后面的 `pet_cmd`。
 
 ```json
 {
@@ -536,7 +536,216 @@ Authorization: Bearer <webrtc.token>
 
 进度看第 5 节的 `pet_cmd`，`cmd` 为 `voice_call`。旧报文里的 `agora_state` 不推给 App。
 
-## 7. 设备有、App 不提供
+## 7. 人翻宠
+
+主人对着手机说话，服务端识别后选一段猫叫或狗叫，在项圈上播放，并在同一次 HTTP 响应里返回文字报告。App 只发一次上传请求，不下发 `speaker_play`，不连接 MQTT，也不拿到 PCM。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App
+    participant AS as App 服务 18082
+    participant GW as ECO 网关
+    participant ECO as enca.pet.human_interact
+    participant IoT as eco-iot
+    participant Collar as 项圈 1.0 Pro
+
+    App->>AS: POST /api/v1/pet/interact/human（file、device_id、request_id、play=1）
+    AS->>GW: 原样转发，换成商家密钥和用户号
+    GW->>GW: 核对设备归属；录音落 OSS
+    GW->>ECO: audio_url、species_kind、language
+    ECO-->>GW: asr_text、reply_category、reply_voice_url…
+    GW->>IoT: speaker_play（url=reply_voice_url）
+    IoT->>IoT: 下载并转成 PCM16LE / 8 kHz / 单声道
+    IoT->>Collar: cmd：speaker_play on=true
+    Collar-->>IoT: state：accepted
+    IoT-->>GW: playback：streaming
+    GW-->>App: 文字报告 + playback
+    loop preset 分片
+        IoT->>Collar: audio：preset，最后一片 last=1
+    end
+    Collar-->>IoT: state：ended / failed / busy
+    IoT-->>App: WebSocket pet_playback
+```
+
+### 7.1 上传录音
+
+带第 2 节的 `Authorization`。请求体是 `multipart/form-data`，不是 JSON。
+
+```http
+POST /api/v1/pet/interact/human
+Content-Type: multipart/form-data
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `file` | 是 | 录音文件。Android 是 MP3，iOS 是 AAC，H5 可能是 WAV；文件类型与内容要一致 |
+| `device_id` | 播放时必填 | 第 4 节绑定成功时的 `data.id`，也接受序列号。不传时只返回报告，`playback.status` 为 `skipped` |
+| `pet_id` | 否 | 宠物档案号，用来判断猫或狗 |
+| `species_kind` | 否 | `cat` 或 `dog`。优先于档案 |
+| `duration_ms` | 否 | 录音时长，整数毫秒 |
+| `language` | 否 | 报告语言，例如 `zh`、`en` |
+| `request_id` | 建议 | 这一次录音的编号，8 到 64 位，只能是字母、数字、`-`、`_`。见 7.3 |
+| `play` | 要项圈播放时必填 | 传 `1` 时在项圈上播放。省略或传 `0` 时只返回报告，`playback.status` 为 `skipped`，与旧版行为一致 |
+
+`play=1` 且不是这台设备的主人，或设备不存在时，请求在识别之前就失败，`code` 为 `10403` 或 `10404`，不扣识别次数。设备服务暂时不可用时不拦请求，照常返回报告，`playback.status` 为 `skipped`，原因看 `reason`。没有传 `play=1` 时不核对设备，也不会因设备问题失败。
+
+这个请求要等识别和项圈接受播放，读超时按 120 秒设置。
+
+### 7.2 响应
+
+成功时 `code` 为 `0`。`data` 示例：
+
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "request_id": "h2p-mf3k9a-7x2b1c9d",
+    "message_id": "<互动编号>",
+    "asr_text": "过来吃饭",
+    "audio_url": "https://<桶域名>/analysis_media/<录音>.mp3",
+    "reply_voice_url": "https://<桶域名>/voice_packs/cat/food_request_01.mp3",
+    "reply_voice_key": "cat_food_request_01",
+    "reply_voice_label": "求食",
+    "reply_category": "求食呼叫",
+    "reply_category_code": "food_request_call",
+    "llm_reason": "主人在叫宠物吃饭",
+    "emotion": "happy",
+    "report": {
+      "asr_text": "过来吃饭",
+      "reply_category": "求食呼叫",
+      "reply_category_code": "food_request_call",
+      "reply_voice_label": "求食",
+      "llm_reason": "主人在叫宠物吃饭",
+      "emotion": "happy"
+    },
+    "playback": {
+      "playback_id": "<播放编号>",
+      "status": "streaming",
+      "code": 0,
+      "duration_ms": 1800
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `audio_url` | 主人刚才那段录音。**不是**项圈播放的声音 |
+| `reply_voice_url` | 项圈播放的猫叫或狗叫。手机试听也用它 |
+| `report` | 文字报告。字段与外层同名字段相同，只是收在一起。为空的字段是空字符串 |
+| `asr_text` | 主人说的话。没有识别出时可能为空，这时仍会选一段默认叫声 |
+| `llm_reason` | 为什么选这一段。也可能是「本地关键词」「识别为空」等降级说明 |
+| `playback` | 项圈播放状态。见 7.4 |
+
+报告成功、项圈没播成时，HTTP 仍然成功，`code` 为 `0`，只是 `playback.status` 不是 `streaming`。这时不要换新的 `request_id` 重发，那样会重新识别并扣次数；按 7.6 在手机上播放 `reply_voice_url` 即可。
+
+识别失败时 `code` 不为 `0`，没有 `report`，也不会播放。
+
+### 7.3 重试与 request_id
+
+每段录音生成一个 `request_id`，网络超时、令牌刷新后重发时沿用同一个值。
+
+- 10 分钟内用同一个 `request_id` 再发，直接返回第一次的 `data`，不再识别、不再播放。
+- 第一次还没处理完时又发了一次，`code` 为 `10409`，`msg` 为「同一请求正在处理，请稍后用相同 request_id 重试」。隔几秒用同一个值再发即可。
+- 不带 `request_id` 时每次都是新的一次，会重复识别和播放。
+
+`request_id` 只在同一个登录用户下生效。
+
+### 7.4 播放状态
+
+`playback.status`：
+
+| status | 含义 | 后续 |
+| --- | --- | --- |
+| `streaming` | 项圈已接受，正在推音频 | 等 `pet_playback` 推 `ended`、`failed`、`busy` 或 `timeout` |
+| `preparing` | 已发命令，项圈还没回执 | 同上 |
+| `ended` | 播完，或被停止 | 结束 |
+| `busy` | 项圈音频被占用，例如正在通话或录音 | 结束。`code` 一般是 `-11` |
+| `failed` | 没播成。`reason` 是原因 | 结束 |
+| `timeout` | 10 秒内项圈没回执，或推完后没收到结束 | 结束 |
+| `skipped` | 没传 `play=1`、没传 `device_id`，或设备服务暂时不可用 | 不会有推送 |
+| `no_voice` | 没选出可播放的叫声 | 不会有推送 |
+
+`code` 为项圈回执里的错误号，`0` 表示没有错误号：
+
+| `code` | 含义 |
+| --- | --- |
+| `-11` | 录音、播放、蜂鸣或通话占着音频 |
+| `-12` | 未充电且电量不超过 10% |
+| `-20` | 项圈打不开扬声器 |
+| `10409` | 这台项圈上一段还没播完，服务端拒绝新的播放 |
+
+其它非零 `code` 是服务端错误码，原因看 `reason`，例如「回复音频下载失败」「回复音频转码失败」「MQTT 通道未就绪」。项圈离线时服务端不预先拦截，表现为 `timeout`。
+
+播放最长 30 秒，超出部分截断。同一台项圈一次只播一段。回复音频只从公网地址下载，内网、回环、云元数据等地址一律拒绝。
+
+### 7.5 播放进度推送
+
+进入项圈页时，在第 5 节那条 WebSocket 上再订一条：
+
+| 数据 | 订阅 topic | 推送 type |
+| --- | --- | --- |
+| 人翻宠播放 | `pet_playback:<data.id>` | `pet_playback` |
+
+加上第 5 节的七条，一共八条，正好是一条连接的上限。
+
+订上之后，有最近一条时先推这一帧。每次状态变化推一帧。`data` 与 7.2 里的 `playback` 同形，另外多 `request_id`、`device_id`、`frames`、`ts`。按 `playback_id` 对到 7.2 返回的那一次，对不上的帧忽略。
+
+```json
+{
+  "type": "pet_playback",
+  "topic": "pet_playback:<data.id>",
+  "data": {
+    "playback_id": "<播放编号>",
+    "request_id": "h2p-mf3k9a-7x2b1c9d",
+    "device_id": "<data.id>",
+    "status": "ended",
+    "code": 0,
+    "frames": 150,
+    "duration_ms": 1800,
+    "ts": 1795700000
+  }
+}
+```
+
+项圈没播成：
+
+```json
+{
+  "type": "pet_playback",
+  "topic": "pet_playback:<data.id>",
+  "data": {
+    "playback_id": "<播放编号>",
+    "device_id": "<data.id>",
+    "status": "busy",
+    "code": -11,
+    "reason": "项圈音频被占用",
+    "ts": 1795700000
+  }
+}
+```
+
+不是这台设备的主人时回 `error`，`data.msg` 是「无权订阅该设备播放」。
+
+断线后补齐一次：
+
+```http
+GET /api/v1/pet/devices/<data.id>/playback-latest
+```
+
+`data` 与最后一条 `pet_playback` 的 `data` 相同。24 小时内没有播放时 `data` 为 `null`。
+
+项圈侧的 `speaker_play` 回执同样会出现在第 5 节的 `pet_cmd` 里，`cmd` 为 `speaker_play`。页面看播放结果以 `pet_playback` 为准。
+
+### 7.6 手机端行为
+
+- `playback.status` 为 `streaming`、`preparing`、`ended` 时，手机不自动播放，避免和项圈同时出声。点气泡上的 AI 图标仍可用 `reply_voice_url` 试听。
+- 为 `busy`、`failed`、`timeout` 时提示 `reason`，并在手机上播放 `reply_voice_url`。
+- 为 `skipped`、`no_voice`，或旧版服务端没有 `playback` 时，按原来的方式在手机上播放。
+
+## 8. 设备有、App 不提供
 
 这些出现在设备报文里，App 没有对应的订阅或查询。
 
@@ -546,4 +755,5 @@ Authorization: Bearer <webrtc.token>
 | `mode_state` | 不推送、不查询 |
 | `wifi_scan` | 丢弃 |
 | `agora_state` | 丢弃，通话进度只看 `pet_cmd` |
-| `mic_record`、`speaker_play` | App 不能下发。录音只在拼完后走第 5 节的 `pet_mic` |
+| `mic_record` | App 不能下发。录音只在拼完后走第 5 节的 `pet_mic` |
+| `speaker_play` | App 不能经 `/devices/<id>/command` 下发。只由第 7 节人翻宠在服务端发起，PCM 分片不经过 App |
