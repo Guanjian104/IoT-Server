@@ -49,6 +49,7 @@ type peer struct {
 	stopped     bool
 	done        chan struct{}
 	neg         chan struct{}
+	downlink    *webrtc.TrackLocalStaticRTP
 }
 
 type forwardTrack struct {
@@ -239,6 +240,11 @@ func (r *Room) HandleOffer(id string, offer webrtc.SessionDescription) (webrtc.S
 		member.dirty = true
 		go readRTCP(r.ctx, sender)
 	}
+	if len(tracks) == 0 {
+		if err := r.attachDownlink(member, offer); err != nil {
+			return webrtc.SessionDescription{}, err
+		}
+	}
 	if err := member.pc.SetRemoteDescription(offer); err != nil {
 		return webrtc.SessionDescription{}, err
 	}
@@ -321,7 +327,8 @@ func (r *Room) Close() error {
 }
 
 func (r *Room) forward(publisherID string, remote *webrtc.TrackRemote) {
-	local, err := webrtc.NewTrackLocalStaticRTP(remote.Codec().RTPCodecCapability, remote.ID(), remote.StreamID())
+	codec := remote.Codec().RTPCodecCapability
+	local, err := webrtc.NewTrackLocalStaticRTP(codec, remote.ID(), remote.StreamID())
 	if err != nil {
 		r.fail(err)
 		return
@@ -347,8 +354,13 @@ func (r *Room) forward(publisherID string, remote *webrtc.TrackRemote) {
 	}
 	r.tracks[key] = track
 	targets := make([]*peer, 0, len(r.peers))
+	var ready []*webrtc.TrackLocalStaticRTP
 	for id, member := range r.peers {
 		if !delivers(id, publisherID) {
+			continue
+		}
+		if member.downlink != nil && sameCodec(member.downlink.Codec(), codec) {
+			ready = append(ready, member.downlink)
 			continue
 		}
 		targets = append(targets, member)
@@ -367,10 +379,10 @@ func (r *Room) forward(publisherID string, remote *webrtc.TrackRemote) {
 		member.signal.Unlock()
 		r.requestNegotiation(member.id)
 	}
-	go r.pump(ctx, remote, local)
+	go r.pump(ctx, remote, local, ready)
 }
 
-func (r *Room) pump(ctx context.Context, remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP) {
+func (r *Room) pump(ctx context.Context, remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP, ready []*webrtc.TrackLocalStaticRTP) {
 	buffer := make([]byte, 1500)
 	for {
 		if ctx.Err() != nil {
@@ -396,7 +408,74 @@ func (r *Room) pump(ctx context.Context, remote *webrtc.TrackRemote, local *webr
 			r.fail(err)
 			return
 		}
+		for _, extra := range ready {
+			_, _ = extra.Write(buffer[:n])
+		}
 	}
+}
+
+// attachDownlink 在项圈先加入、对端还没有音轨时先放一条同编码的发送轨。
+// 这样第一份应答就是 sendrecv，项圈不用再协商一次也能听到后来的下行。
+func (r *Room) attachDownlink(member *peer, offer webrtc.SessionDescription) error {
+	side, ok := voiceCallSide(member.id)
+	if !ok || side != "DEVICE" || !offerWantsReceive(offer) {
+		return nil
+	}
+	codec, ok := offeredVoiceCodec(offer)
+	if !ok {
+		return nil
+	}
+	track, err := webrtc.NewTrackLocalStaticRTP(codec, "downlink", "downlink")
+	if err != nil {
+		return err
+	}
+	sender, err := member.pc.AddTrack(track)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	member.downlink = track
+	r.mu.Unlock()
+	go readRTCP(r.ctx, sender)
+	return nil
+}
+
+func offerWantsReceive(offer webrtc.SessionDescription) bool {
+	sendOnly := false
+	for _, line := range strings.Split(offer.SDP, "\n") {
+		line = strings.ToLower(strings.TrimSpace(strings.TrimRight(line, "\r")))
+		switch line {
+		case "a=sendrecv", "a=recvonly":
+			return true
+		case "a=sendonly":
+			sendOnly = true
+		}
+	}
+	return !sendOnly
+}
+
+func offeredVoiceCodec(offer webrtc.SessionDescription) (webrtc.RTPCodecCapability, bool) {
+	for _, codec := range []webrtc.RTPCodecCapability{
+		{MimeType: webrtc.MimeTypeG722, ClockRate: 8000},
+		{MimeType: webrtc.MimeTypePCMA, ClockRate: 8000},
+	} {
+		if offerSupports(offer, codec) {
+			return codec, true
+		}
+	}
+	return webrtc.RTPCodecCapability{}, false
+}
+
+func sameCodec(left, right webrtc.RTPCodecCapability) bool {
+	return codecName(left) == codecName(right) && left.ClockRate == right.ClockRate && codecName(left) != ""
+}
+
+func codecName(codec webrtc.RTPCodecCapability) string {
+	name := codec.MimeType
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func (r *Room) offer(member *peer) {

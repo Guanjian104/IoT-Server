@@ -168,6 +168,28 @@ func connect(t *testing.T, client *webrtc.PeerConnection, room *Room, id string)
 	}
 }
 
+func TestDeviceFirstAnswerCanSend(t *testing.T) {
+	room, err := NewRoom("room-downlink", NewAPI(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = room.Close() })
+	const device = "call:9030d6cb2703"
+	if err := room.Join(device); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := room.HandleOffer(device, g722OnlyOffer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(answer.SDP, "recvonly") || !strings.Contains(answer.SDP, "sendrecv") || !strings.Contains(answer.SDP, "G722/8000") {
+		t.Fatalf("answer = %s", answer.SDP)
+	}
+	if strings.Count(answer.SDP, "m=audio") != 1 {
+		t.Fatalf("answer = %s", answer.SDP)
+	}
+}
+
 func TestOfferSkipsTrackItCannotReceive(t *testing.T) {
 	room, err := NewRoom("room-codec", NewAPI(), nil)
 	if err != nil {
@@ -205,13 +227,26 @@ func TestOfferSkipsTrackItCannotReceive(t *testing.T) {
 	}
 }
 
+func g722OnlyOffer(t *testing.T) webrtc.SessionDescription {
+	t.Helper()
+	return audioOnlyOffer(t, webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeG722, ClockRate: 8000},
+		PayloadType:        9,
+	}, "G722/8000")
+}
+
 func pcmaOnlyOffer(t *testing.T) webrtc.SessionDescription {
 	t.Helper()
-	var mediaEngine webrtc.MediaEngine
-	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+	return audioOnlyOffer(t, webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMA, ClockRate: 8000, Channels: 1},
 		PayloadType:        8,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
+	}, "PCMA/8000")
+}
+
+func audioOnlyOffer(t *testing.T, codec webrtc.RTPCodecParameters, needle string) webrtc.SessionDescription {
+	t.Helper()
+	var mediaEngine webrtc.MediaEngine
+	if err := mediaEngine.RegisterCodec(codec, webrtc.RTPCodecTypeAudio); err != nil {
 		t.Fatal(err)
 	}
 	var settings webrtc.SettingEngine
@@ -236,7 +271,7 @@ func pcmaOnlyOffer(t *testing.T) webrtc.SessionDescription {
 	}
 	<-webrtc.GatheringCompletePromise(pc)
 	local := pc.LocalDescription()
-	if local == nil || !strings.Contains(local.SDP, "PCMA/8000") || strings.Contains(local.SDP, "opus/48000") {
+	if local == nil || !strings.Contains(local.SDP, needle) || strings.Contains(local.SDP, "opus/48000") {
 		t.Fatalf("offer = %v", local)
 	}
 	return *local
