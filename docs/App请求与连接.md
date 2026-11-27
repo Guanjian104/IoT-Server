@@ -745,7 +745,117 @@ GET /api/v1/pet/devices/<data.id>/playback-latest
 - 为 `busy`、`failed`、`timeout` 时提示 `reason`，并在手机上播放 `reply_voice_url`。
 - 为 `skipped`、`no_voice`，或旧版服务端没有 `playback` 时，按原来的方式在手机上播放。
 
-## 8. 设备有、App 不提供
+## 8. 宠翻人
+
+项圈录一段宠物的声音，服务端识别后，在同一次停止响应里返回文字。App 只发两次请求：开始，停止。App 不录音、不上传音频、不下发 `mic_record`、不连接 MQTT，也不单独调用识别。
+
+开始成功后才进入录音。设备正忙、电量过低、麦克风打不开、项圈没确认，都是失败，这时没有 `recording_id`。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App
+    participant AS as App 服务 18082
+    participant GW as ECO 网关
+    participant IoT as eco-iot
+    participant Collar as 项圈 1.0 Pro
+
+    App->>AS: POST /recordings（pet_id、max_duration_s、request_id）
+    AS->>GW: 原样转发，换成商家密钥和用户号
+    GW->>IoT: 核对归属、宠物、在线，占住这台项圈
+    IoT->>Collar: cmd：mic_record on=true
+    Collar-->>IoT: state：accepted
+    IoT-->>App: recording_id、status=recording、deadline
+    App->>AS: POST /recordings/{recording_id}/stop
+    AS->>GW: 原样转发
+    GW->>IoT: 若还在录，cmd：mic_record on=false
+    Collar-->>IoT: audio 分片，最后一片 last=1
+    IoT->>IoT: 拼成这一次的录音，另存 WAV
+    GW->>GW: 用这一次的地址做识别，只做一次
+    GW-->>App: clip_id、audio_url、duration_ms、report
+```
+
+### 8.1 开始
+
+带第 2 节的 `Authorization`。`device_id` 用第 4 节绑定成功时的 `data.id`，也接受序列号。本机设备号会在 App 服务里换成序列号。
+
+```http
+POST /api/v1/pet/devices/{device_id}/recordings
+Content-Type: application/json
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `pet_id` | 是 | 这台设备当前关联的宠物档案 |
+| `max_duration_s` | 是 | 最长录音秒数，1 到 60 |
+| `request_id` | 是 | 这一次录音的编号，8 到 64 位，只能是字母、数字、`-`、`_` |
+
+成功时 `code` 为 `0`。`data`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `recording_id` | 这一次录音。停止和查询都用它 |
+| `status` | `recording` |
+| `deadline` | 最长录到什么时候，RFC3339 |
+
+读超时按 20 秒设置。项圈接受之后才会返回。
+
+同一个 `request_id` 再发开始，返回同一次会话，不会再下发命令。上一次还在等项圈时，`code` 为 `10409`，`msg` 为「同一请求正在处理，请稍后用相同 request_id 重试」。确认超时后，同一个 `request_id` 得到失败，要换一个新的 `request_id` 再录。
+
+| `code` | `msg` | App |
+| --- | --- | --- |
+| `10409` | 设备正忙 | 不要进入录音。音频被占用，或上一次会话还没结束 |
+| `15005` | 设备不在线 | 不要进入录音 |
+| `10400` | 电量过低 | 不要进入录音 |
+| `10400` | 麦克风无法打开 | 不要进入录音 |
+| `15004` | 项圈没有确认录音 | 不要进入录音 |
+| `10400` | 宠物与设备不匹配 | 不要进入录音 |
+| `10403` | 无权访问该设备 | 不要进入录音 |
+
+### 8.2 停止
+
+```http
+POST /api/v1/pet/devices/{device_id}/recordings/{recording_id}/stop
+```
+
+没有请求体。这个请求会停住还在进行的录音，等这一段音频归档并识别。读超时按 160 秒设置。
+
+成功时 `code` 为 `0`，HTTP 200。`data`：
+
+| 字段 | 说明 |
+| --- | --- |
+| `recording_id` | 与开始时相同 |
+| `clip_id` | 这一段录音 |
+| `audio_url` | 8 kHz、单声道、16 bit 的 WAV，用来播放。不是设备最近一条录音 |
+| `duration_ms` | 时长，毫秒 |
+| `report.meaning_text` | 这句话在说什么 |
+| `report.emotion` | 情绪 |
+| `report.message_id` | 这次识别的编号 |
+| `report.summary` | 摘要。没有时为空字符串 |
+| `report.translation` | 转写。没有时为空字符串 |
+| `report.confidence` | 把握。没有时为空字符串 |
+| `report.detected_species` | 识别到的物种。没有时为空字符串 |
+
+重复停止不会再下发命令，也不会再识别一次。已经有报告时直接返回同一份。
+
+音频还没到齐、等待时间用完，或连接断开时，HTTP 202，`code` 仍为 `0`，`msg` 为 `accepted`。`data` 只有 `recording_id` 和 `status`（`stopping` 或 `recognizing`），没有 `report`。这时用 8.3 查询，不要再发一次开始。
+
+| 情况 | `code` | `msg` | 录音 |
+| --- | --- | --- | --- |
+| 分片没收齐 | `10400` | 未收到完整录音 | 没有 `audio_url` |
+| 识别没成功 | `15004` | 识别失败 | 保留 `clip_id` 和 `audio_url`。再停一次只重试识别 |
+
+### 8.3 查询
+
+停止返回 202，或 App 没拿到响应时使用。平时不要作为第三次请求。
+
+```http
+GET /api/v1/pet/devices/{device_id}/recordings/{recording_id}
+```
+
+读超时按 160 秒设置。已经识别完时，`data` 与 8.2 成功时相同。还在收录音时 `status` 为 `stopping`，正在识别时为 `recognizing`，都还没有 `report`。
+
+## 9. 设备有、App 不提供
 
 这些出现在设备报文里，App 没有对应的订阅或查询。
 
@@ -755,5 +865,5 @@ GET /api/v1/pet/devices/<data.id>/playback-latest
 | `mode_state` | 不推送、不查询 |
 | `wifi_scan` | 丢弃 |
 | `agora_state` | 丢弃，通话进度只看 `pet_cmd` |
-| `mic_record` | App 不能下发。录音只在拼完后走第 5 节的 `pet_mic` |
+| `mic_record` | App 不能经 `/devices/<id>/command` 下发。宠翻人走第 8 节；原始分片不经过 App |
 | `speaker_play` | App 不能经 `/devices/<id>/command` 下发。只由第 7 节人翻宠在服务端发起，PCM 分片不经过 App |
