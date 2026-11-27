@@ -176,7 +176,21 @@ func finish(cfg Config, values map[string]string) (Config, error) {
 		cfg.SFUUDPMin = minPort
 		cfg.SFUUDPMax = maxPort
 	}
+	cfg.RTPDebugDir = "/tmp/rtp-debug"
+	if value := strings.TrimSpace(values["IOT_RTP_DEBUG_DIR"]); value != "" {
+		if !validRTPDebugDir(value) {
+			return Config{}, errors.New("invalid IOT_RTP_DEBUG_DIR")
+		}
+		cfg.RTPDebugDir = value
+	}
 	return cfg, nil
+}
+
+func validRTPDebugDir(path string) bool {
+	if len(path) < 2 || len(path) > 200 || !strings.HasPrefix(path, "/") || strings.Contains(path, "..") || strings.ContainsRune(path, 0) {
+		return false
+	}
+	return path != "/"
 }
 
 func publicIPv4(value string) bool {

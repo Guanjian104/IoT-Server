@@ -99,6 +99,7 @@ func (rt *runtime) openSFU() error {
 	}
 	rt.sfu = node
 	node.UseLog(rt.log)
+	node.UseRTPDebugDir(rt.cfg.RTPDebugDir)
 	if rt.store != nil {
 		rt.store.UseMedia(node.Media())
 	}

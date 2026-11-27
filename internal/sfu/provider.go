@@ -144,6 +144,27 @@ func resourceID(sessionID string) (string, error) {
 	return "pion-" + sessionID, nil
 }
 
+func (p *Provider) StartRTPDebug(sessionID string, opt RTPDebugOptions) error {
+	if p == nil || p.node == nil {
+		return ErrRTPDebugNotFound
+	}
+	return p.node.StartRTPDebug(sessionID, opt)
+}
+
+func (p *Provider) StopRTPDebug(sessionID string) (RTPReport, error) {
+	if p == nil || p.node == nil {
+		return RTPReport{}, ErrRTPDebugNotFound
+	}
+	return p.node.StopRTPDebug(sessionID)
+}
+
+func (p *Provider) RTPDebugReport(sessionID string) (RTPReport, error) {
+	if p == nil || p.node == nil {
+		return RTPReport{}, ErrRTPDebugNotFound
+	}
+	return p.node.RTPDebugReport(sessionID)
+}
+
 func (n *Node) deleteRoom(resourceID string) error {
 	n.mu.Lock()
 	room := n.rooms[resourceID]

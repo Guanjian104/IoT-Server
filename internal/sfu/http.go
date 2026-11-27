@@ -25,11 +25,13 @@ type Node struct {
 	http      *http.Server
 	log       logger.Logger
 
-	mu        sync.Mutex
-	rooms     map[string]*Room
-	bySession map[string]string
-	sessionOf map[string]string
-	boxes     map[string]chan webrtc.SessionDescription
+	mu         sync.Mutex
+	rooms      map[string]*Room
+	bySession  map[string]string
+	sessionOf  map[string]string
+	boxes      map[string]chan webrtc.SessionDescription
+	debugDir   string
+	rtpReports map[string]RTPReport
 }
 
 // Listen 在本机地址上启动 WHIP 和 WHEP。端口可以是 0。

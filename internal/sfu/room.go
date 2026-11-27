@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/ice/v4"
@@ -37,6 +38,9 @@ type Room struct {
 	err    error
 	peers  map[string]*peer
 	tracks map[string]*forwardTrack
+
+	debugMu sync.Mutex
+	uplink  atomic.Pointer[rtpDebug]
 }
 
 type peer struct {
@@ -58,6 +62,8 @@ type forwardTrack struct {
 	kind        string
 	local       *webrtc.TrackLocalStaticRTP
 	cancel      context.CancelFunc
+	subMu       sync.Mutex
+	subs        []rtpSubscriber
 }
 
 // NewAPI 创建只走本机 IPv4、关闭 mDNS 的 WebRTC API。房间和测试端点共用它。
@@ -237,6 +243,7 @@ func (r *Room) HandleOffer(id string, offer webrtc.SessionDescription) (webrtc.S
 		if addErr != nil {
 			continue
 		}
+		track.addSub(id, sender)
 		member.dirty = true
 		go readRTCP(r.ctx, sender)
 	}
@@ -295,6 +302,7 @@ func (r *Room) Err() error {
 
 // Close 停止转发并关闭房间内的连接。
 func (r *Room) Close() error {
+	r.stopUplinkDebug()
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -373,16 +381,17 @@ func (r *Room) forward(publisherID string, remote *webrtc.TrackRemote) {
 			r.fail(addErr)
 			continue
 		}
+		track.addSub(member.id, sender)
 		go readRTCP(r.ctx, sender)
 		member.signal.Lock()
 		member.dirty = true
 		member.signal.Unlock()
 		r.requestNegotiation(member.id)
 	}
-	go r.pump(ctx, remote, local, ready)
+	go r.pump(ctx, remote, local, ready, track)
 }
 
-func (r *Room) pump(ctx context.Context, remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP, ready []*webrtc.TrackLocalStaticRTP) {
+func (r *Room) pump(ctx context.Context, remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP, ready []*webrtc.TrackLocalStaticRTP, track *forwardTrack) {
 	buffer := make([]byte, 1500)
 	for {
 		if ctx.Err() != nil {
@@ -404,7 +413,10 @@ func (r *Room) pump(ctx context.Context, remote *webrtc.TrackRemote, local *webr
 			r.fail(err)
 			return
 		}
-		if _, err := local.Write(buffer[:n]); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+		_, err = local.Write(buffer[:n])
+		// 调试关闭时只读一个空指针，不改这一包的内容，也不改写给谁。
+		r.noteDeviceUplink(track, remote, buffer[:n], err)
+		if err != nil && !errors.Is(err, io.ErrClosedPipe) {
 			r.fail(err)
 			return
 		}

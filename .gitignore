@@ -46,3 +46,6 @@ temp/
 
 # 通话抓包。data/pcap 里的文件不进入仓库。
 /data/pcap/
+
+# 设备上行 RTP 诊断拷出的文件。
+/data/rtp-debug/

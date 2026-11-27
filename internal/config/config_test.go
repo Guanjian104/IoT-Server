@@ -193,6 +193,31 @@ func TestSFUPublicEndpoint(t *testing.T) {
 	}
 }
 
+func TestRTPDebugDir(t *testing.T) {
+	cfg, err := Load(func(key string) (string, bool) {
+		if key == "IOT_RTP_DEBUG_DIR" {
+			return "/tmp/rtp-debug", true
+		}
+		return "", false
+	})
+	if err != nil || cfg.RTPDebugDir != "/tmp/rtp-debug" {
+		t.Fatalf("dir = %s err = %v", cfg.RTPDebugDir, err)
+	}
+	cfg, err = Load(func(string) (string, bool) { return "", false })
+	if err != nil || cfg.RTPDebugDir != "/tmp/rtp-debug" {
+		t.Fatalf("default = %s err = %v", cfg.RTPDebugDir, err)
+	}
+	_, err = Load(func(key string) (string, bool) {
+		if key == "IOT_RTP_DEBUG_DIR" {
+			return "data/rtp-debug", true
+		}
+		return "", false
+	})
+	if err == nil || err.Error() != "invalid IOT_RTP_DEBUG_DIR" {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.env")

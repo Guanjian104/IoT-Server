@@ -26,6 +26,7 @@ type Config struct {
 	SFUPublicURL       string
 	SFUUDPMin          int
 	SFUUDPMax          int
+	RTPDebugDir        string
 	InstanceID         string
 	ConfigVersion      string
 	LogLevel           string
@@ -67,6 +68,7 @@ var knownKeys = []string{
 	"IOT_SFU_PUBLIC_URL",
 	"IOT_SFU_UDP_MIN",
 	"IOT_SFU_UDP_MAX",
+	"IOT_RTP_DEBUG_DIR",
 	"IOT_INSTANCE_ID",
 	"IOT_CONFIG_VERSION",
 	"IOT_LOG_LEVEL",
